@@ -1,0 +1,14 @@
+{% extends "_layouts/cp" %}
+
+{% set plugin = craft.app.plugins.getPlugin('smart-links') %}
+{% set title = plugin.name %}
+
+{% block content %}
+    <p>{{ "Smart Links is installed and running."|t('smart-links') }}</p>
+    <p class="light">
+        {{ "Version {version}, schema version {schemaVersion}."|t('smart-links', {
+            version: plugin.version,
+            schemaVersion: plugin.schemaVersion,
+        }) }}
+    </p>
+{% endblock %}

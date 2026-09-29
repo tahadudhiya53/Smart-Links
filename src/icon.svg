@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <linearGradient id="sl-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#818cf8"/>
+      <stop offset="1" stop-color="#4f46e5"/>
+    </linearGradient>
+  </defs>
+  <rect width="100" height="100" rx="22" fill="url(#sl-bg)"/>
+  <g fill="#fff" transform="translate(50 50) scale(1.25) rotate(-45) translate(-50 -50)">
+    <path fill-rule="evenodd" d="M20 38H40A12 12 0 0 1 40 62H20A12 12 0 0 1 20 38ZM20 43A7 7 0 0 0 20 57H40A7 7 0 0 0 40 43Z"/>
+    <path fill-rule="evenodd" d="M60 38H80A12 12 0 0 1 80 62H60A12 12 0 0 1 60 38ZM60 43A7 7 0 0 0 60 57H80A7 7 0 0 0 80 43Z"/>
+  </g>
+</svg>

@@ -1,0 +1,71 @@
+{
+    "name": "tahadudhiya53/craft-smart-links",
+    "description": "Complete link management and link intelligence for Craft CMS.",
+    "type": "craft-plugin",
+    "version": "5.0.0",
+    "license": "proprietary",
+    "keywords": [
+        "craft",
+        "craftcms",
+        "craft-plugin",
+        "links",
+        "link-management",
+        "smart-links"
+    ],
+    "authors": [
+        {
+            "name": "Taha Dudhiya"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/tahadudhiya53/Smart-Links/issues",
+        "source": "https://github.com/tahadudhiya53/Smart-Links",
+        "docs": "https://github.com/tahadudhiya53/Smart-Links#readme",
+        "rss": "https://github.com/tahadudhiya53/Smart-Links/releases.atom"
+    },
+    "require": {
+        "php": ">=8.2.0",
+        "craftcms/cms": "^5.9.0"
+    },
+    "require-dev": {
+        "craftcms/ecs": "dev-main",
+        "craftcms/phpstan": "dev-main",
+        "phpstan/phpstan": "^2.2",
+        "phpunit/phpunit": "^11.5"
+    },
+    "autoload": {
+        "psr-4": {
+            "Tahadudhiya\\SmartLinks\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tahadudhiya\\SmartLinks\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "class": "Tahadudhiya\\SmartLinks\\SmartLinks",
+        "handle": "smart-links",
+        "name": "Smart Links",
+        "developer": "Taha Dudhiya",
+        "documentationUrl": "https://github.com/tahadudhiya53/Smart-Links#readme",
+        "changelogUrl": "https://raw.githubusercontent.com/tahadudhiya53/Smart-Links/main/CHANGELOG.md"
+    },
+    "scripts": {
+        "check-cs": "@php -d error_reporting=6143 vendor/bin/ecs check --ansi",
+        "fix-cs": "@php -d error_reporting=6143 vendor/bin/ecs check --ansi --fix",
+        "phpstan": "@php vendor/bin/phpstan analyse --no-progress --memory-limit=1G",
+        "test": "phpunit",
+        "test-integration": "@php vendor/bin/phpunit -c phpunit.integration.xml.dist"
+    },
+    "config": {
+        "sort-packages": true,
+        "platform": {
+            "php": "8.2.0"
+        },
+        "allow-plugins": {
+            "yiisoft/yii2-composer": true,
+            "craftcms/plugin-installer": true
+        }
+    }
+}
