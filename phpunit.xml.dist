@@ -8,4 +8,11 @@
             <directory>tests/unit</directory>
         </testsuite>
     </testsuites>
+    <!-- Deprecations raised inside Craft or other dependencies are theirs to fix; only Smart
+         Links' own are reported. -->
+    <source ignoreIndirectDeprecations="true">
+        <include>
+            <directory>src</directory>
+        </include>
+    </source>
 </phpunit>
