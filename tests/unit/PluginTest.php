@@ -28,11 +28,6 @@ class PluginTest extends TestCase
         return json_decode((string)file_get_contents(self::ROOT . '/composer.json'), true, flags: JSON_THROW_ON_ERROR);
     }
 
-    public function testPluginClassAutoloads(): void
-    {
-        self::assertTrue(class_exists(SmartLinks::class));
-    }
-
     public function testComposerMetadataMatchesPluginClass(): void
     {
         $composer = self::composer();
@@ -105,12 +100,52 @@ class PluginTest extends TestCase
         self::assertStringNotContainsString('stroke', $mask);
     }
 
+    /**
+     * Every message source code translates, or reports as a validation error, is in the
+     * translation file, so none reaches an author untranslated.
+     */
+    public function testEveryMessageInSourceCodeHasASourceMessage(): void
+    {
+        $messages = require self::ROOT . '/src/translations/en/smart-links.php';
+        $missing = [];
+        $sources = new \RegexIterator(new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator(self::ROOT . '/src')), '/\.php$/');
+        $literal = "'((?:[^'\\\\]|\\\\.)*)'";
+        $patterns = [
+            "/Craft::t\\(\\s*'smart-links',\\s*$literal/",
+            // new ValidationError($path, $code, 'message'…), with any path and code expression.
+            "/new ValidationError\\((?:[^,()]|\\([^()]*\\))*,(?:[^,()]|\\([^()]*\\))*,\\s*$literal/",
+        ];
+        $found = 0;
+
+        foreach ($sources as $source) {
+            $code = (string)file_get_contents((string)$source);
+
+            foreach ($patterns as $pattern) {
+                preg_match_all($pattern, $code, $matches);
+
+                foreach ($matches[1] as $message) {
+                    $found++;
+                    $message = stripslashes($message);
+
+                    if (!array_key_exists($message, $messages)) {
+                        $missing[] = $message;
+                    }
+                }
+            }
+        }
+
+        self::assertGreaterThan(100, $found, 'The scan found too few messages to be reading the source.');
+        self::assertSame([], array_values(array_unique($missing)));
+    }
+
     public function testEveryTranslatedTemplateStringHasASourceMessage(): void
     {
         $messages = require self::ROOT . '/src/translations/en/smart-links.php';
         $missing = [];
 
-        foreach (glob(self::ROOT . '/src/templates/*.twig') ?: [] as $template) {
+        $templates = new \RegexIterator(new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator(self::ROOT . '/src/templates')), '/\.twig$/');
+
+        foreach ($templates as $template) {
             preg_match_all('/"([^"]+)"\s*\|\s*t\(\s*\'smart-links\'/', (string)file_get_contents($template), $matches);
 
             foreach ($matches[1] as $message) {

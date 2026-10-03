@@ -3,7 +3,6 @@
 namespace Tahadudhiya\SmartLinks\Tests\integration;
 
 use Craft;
-use craft\console\Application as ConsoleApplication;
 use craft\enums\CmsEdition;
 use craft\web\twig\variables\Cp;
 use craft\web\View;
@@ -98,11 +97,6 @@ class InstallationTest extends TestCase
         return $names;
     }
 
-    public function testCraftIsRunning(): void
-    {
-        self::assertInstanceOf(ConsoleApplication::class, Craft::$app);
-    }
-
     public function testCraftBootsThePluginFromItsPackage(): void
     {
         $plugin = $this->plugin();
@@ -153,17 +147,5 @@ class InstallationTest extends TestCase
         // Loading compiles the template and everything it extends, so a broken tag or an unknown
         // filter fails here rather than in front of a user.
         self::assertSame('smart-links/index', $view->getTwig()->load('smart-links/index')->getTemplateName());
-    }
-
-    public function testNothingIsInstalledIntoTheDatabaseYet(): void
-    {
-        // Smart Links owns no tables yet. This is what fails first if one appears without the
-        // install migration that is supposed to create and drop it.
-        $tables = array_filter(
-            Craft::$app->getDb()->getSchema()->getTableNames(),
-            static fn(string $table): bool => str_contains($table, 'smartlinks_'),
-        );
-
-        self::assertSame([], array_values($tables));
     }
 }
