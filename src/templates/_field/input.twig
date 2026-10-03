@@ -1,0 +1,51 @@
+{#
+    The Smart Links field's link editor. Links post in the order they appear, so moving one here
+    moves it in the value. The hidden input posts an empty value once the last link is removed.
+#}
+{# Focusable, so focus has somewhere to go in the editor when the last link is removed. #}
+<div id="{{ id }}" class="smartlinks-field" data-smartlinks-field tabindex="-1">
+    {{ hiddenInput(name, '') }}
+
+    {% if errors %}
+        <ul class="errors">
+            {% for error in errors %}
+                <li>{{ error }}</li>
+            {% endfor %}
+        </ul>
+    {% endif %}
+
+    {% if stored is not null %}
+        <div class="smartlinks-field__stored" data-smartlinks-stored>
+            <p class="warning with-icon">{{ "This value can’t be read, so it is kept as it was. Clear it to add links again."|t('smart-links') }}</p>
+            {{ hiddenInput(name ~ '[stored]', stored) }}
+            <button type="button" class="btn" data-smartlinks-clear>{{ "Clear value"|t('smart-links') }}</button>
+        </div>
+    {% endif %}
+
+    <div class="smartlinks-field__links" data-smartlinks-links>
+        {% for linkHtml in links %}
+            {{ linkHtml|raw }}
+        {% endfor %}
+    </div>
+
+    {% if newLinkHtml is not null %}
+        <div class="smartlinks-field__buttons flex">
+            <button type="button" class="btn add icon dashed" data-smartlinks-add{% if stored is not null %} hidden{% endif %}>{{ "Add a link"|t('smart-links') }}</button>
+            <button type="button" class="btn dashed" data-smartlinks-paste hidden>{{ "Paste"|t('smart-links') }}</button>
+            <button type="button" class="btn dashed" data-smartlinks-copy-all{% if links is empty %} hidden{% endif %}>{{ "Copy all links"|t('smart-links') }}</button>
+        </div>
+        <template data-smartlinks-new-link>{{ newLinkHtml|raw }}</template>
+    {% else %}
+        <p class="light">{{ "No link types are available to add links with."|t('smart-links') }}</p>
+    {% endif %}
+
+    <template data-smartlinks-custom-row>
+        {%- include 'smart-links/_field/custom-row' with {
+            name: name,
+            id: id,
+            key: placeholder,
+            index: '__ROW__',
+            row: {name: '', value: ''},
+        } only -%}
+    </template>
+</div>

@@ -1,0 +1,10 @@
+{# The field's value, read-only: each link as it renders, with its type. #}
+{% if links is empty %}
+    <p class="light">{{ "No links."|t('smart-links') }}</p>
+{% else %}
+    <ul class="smartlinks-static">
+        {% for link in links %}
+            <li><span class="light">{{ link.type }}:</span> {{ link.html|raw }}</li>
+        {% endfor %}
+    </ul>
+{% endif %}

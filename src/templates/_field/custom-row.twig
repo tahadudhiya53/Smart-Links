@@ -1,0 +1,27 @@
+{% import '_includes/forms' as forms %}
+{% set baseName = "#{name}[links][#{key}][attributes][custom][#{index}]" %}
+{% set baseId = "#{id}-#{key}-custom-#{index}" %}
+<div class="smartlinks-custom-row flex" data-smartlinks-custom-row-item>
+    <div class="flex-grow">
+        {{ forms.text({
+            id: "#{baseId}-name",
+            name: "#{baseName}[name]",
+            value: row.name,
+            class: 'code',
+            disabled: disabled ?? false,
+            placeholder: 'data-example',
+            inputAttributes: {aria: {label: "Attribute name"|t('smart-links')}},
+        }) }}
+    </div>
+    <div class="flex-grow">
+        {{ forms.text({
+            id: "#{baseId}-value",
+            name: "#{baseName}[value]",
+            value: row.value,
+            disabled: disabled ?? false,
+            inputAttributes: {aria: {label: "Attribute value"|t('smart-links')}},
+        }) }}
+    </div>
+    {# Described by the name, so each row's button says which attribute it removes. #}
+    <button type="button" class="btn small" data-smartlinks-remove-row aria-describedby="{{ baseId }}-name">{{ "Remove attribute"|t('smart-links') }}</button>
+</div>
