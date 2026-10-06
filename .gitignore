@@ -8,3 +8,9 @@ composer.phar
 .env
 .env.*
 !.env.example
+
+# Built by the browser test.
+/tests/browser/.build/
+
+# Written by the control panel test.
+/tests/cp/.build/

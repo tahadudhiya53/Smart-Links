@@ -1,0 +1,231 @@
+{#
+    One link in the Smart Links field's editor. Every offered link type's inputs are here, and only
+    the chosen type's are the link's data. An input for a feature the chosen type does not support
+    is hidden and disabled, so it posts nothing.
+#}
+{% import '_includes/forms' as forms %}
+{% set key = link.key %}
+{% set baseName = "#{name}[links][#{key}]" %}
+{% set baseId = "#{id}-#{key}" %}
+{% set currentType = types|filter(t => t.handle == (link.type ?? null))|first %}
+{% set features = currentType ? currentType.features : [] %}
+{% set editable = (link.stored ?? null) is null and currentType %}
+{% set errors = link.errors ?? [] %}
+{% set title = link.label ?? (currentType ? currentType.name : (link.type ?? "Link"|t('smart-links'))) %}
+
+{# `html` is only ever markup built here from Craft's form macros, which encode every value. #}
+{% macro feature(handle, features, html) %}
+    <div class="smartlinks-link__feature{{ handle in features ? '' : ' hidden' }}" data-smartlinks-feature="{{ handle }}">
+        {{- html|raw -}}
+    </div>
+{% endmacro %}
+
+<div class="smartlinks-link{{ errors ? ' has-errors' }}" data-smartlinks-link data-key="{{ key }}" role="group" aria-labelledby="{{ baseId }}-title"{% if errors %} aria-describedby="{{ baseId }}-errors"{% endif %}>
+    <div class="smartlinks-link__header">
+        <span class="smartlinks-link__drag move icon" title="{{ "Drag to reorder"|t('smart-links') }}" aria-hidden="true"></span>
+        <button type="button" class="smartlinks-link__toggle" aria-expanded="true" aria-controls="{{ baseId }}-body" data-smartlinks-toggle>
+            <span id="{{ baseId }}-title" class="smartlinks-link__title" data-smartlinks-title>{{ title }}</span>
+        </button>
+        {{ disclosureMenu([
+            {label: "Move up"|t('smart-links'), icon: 'arrow-up', id: "#{baseId}-move-up", attributes: {type: 'button', data: {'smartlinks-action': 'move-up'}}},
+            {label: "Move down"|t('smart-links'), icon: 'arrow-down', id: "#{baseId}-move-down", attributes: {type: 'button', data: {'smartlinks-action': 'move-down'}}},
+            {label: "Duplicate"|t('smart-links'), icon: 'clone', id: "#{baseId}-duplicate", attributes: {type: 'button', data: {'smartlinks-action': 'duplicate'}}, hidden: not editable},
+            {label: "Copy"|t('smart-links'), icon: 'copy', id: "#{baseId}-copy", attributes: {type: 'button', data: {'smartlinks-action': 'copy'}}, hidden: not editable},
+            {label: "Remove"|t('smart-links'), icon: 'xmark', id: "#{baseId}-remove", destructive: true, attributes: {type: 'button', data: {'smartlinks-action': 'remove'}}},
+        ], {
+            id: "#{baseId}-actions",
+            buttonAttributes: {
+                class: ['action-btn'],
+                title: "Actions"|t('smart-links'),
+                aria: {label: "Actions for {link}"|t('smart-links', {link: title})},
+            },
+        }) }}
+    </div>
+
+    <div id="{{ baseId }}-body" class="smartlinks-link__body">
+        {% if errors %}
+            <ul class="errors" id="{{ baseId }}-errors">
+                {% for error in errors %}
+                    <li>{{ error }}</li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+
+        {% if not editable %}
+            <p class="warning with-icon">
+                {% if not currentType %}
+                    {{ "This link can’t be edited here, because its link type “{type}” is not available. It is kept exactly as it was until you remove it."|t('smart-links', {type: link.type ?? '?'}) }}
+                {% else %}
+                    {{ "This link has content this editor can’t show, so it is kept exactly as it was until you remove it."|t('smart-links') }}
+                {% endif %}
+            </p>
+            <pre class="smartlinks-link__stored code">{{ link.json ?? link.stored }}</pre>
+            {{ hiddenInput("#{baseName}[stored]", link.stored) }}
+        {% else %}
+            {{ hiddenInput("#{baseName}[uid]", link.uid ?? '', {'data-smartlinks-uid': true}) }}
+            {% if presets is not empty %}
+                {{ forms.selectField({
+                    label: "Preset"|t('smart-links'),
+                    instructions: "The preset this link is made with, if any."|t('smart-links'),
+                    id: "#{baseId}-preset",
+                    name: "#{baseName}[presetUid]",
+                    options: [{label: "None"|t('smart-links'), value: ''}]|merge(presets),
+                    value: link.presetUid ?? '',
+                    inputAttributes: {data: {'smartlinks-preset': true}},
+                }) }}
+            {% endif %}
+
+            {% if types|length > 1 %}
+                {{ forms.selectField({
+                    label: "Link type"|t('smart-links'),
+                    id: "#{baseId}-type",
+                    name: "#{baseName}[type]",
+                    options: types|map(t => {label: t.name, value: t.handle, data: {features: t.features|json_encode}}),
+                    value: link.type,
+                    inputAttributes: {data: {'smartlinks-type': true}},
+                }) }}
+            {% else %}
+                {{ hiddenInput("#{baseName}[type]", link.type, {'data-smartlinks-type': true, 'data-features': features|json_encode, 'data-name': currentType.name}) }}
+            {% endif %}
+
+            {% for type in types %}
+                <div class="smartlinks-link__data{{ type.handle == link.type ? '' : ' hidden' }}" data-smartlinks-data="{{ type.handle }}">
+                    {% namespace "#{baseName}[data][#{type.handle}]" %}
+                        {{ type.type.inputHtml(type.handle == link.type ? (link.data ?? null) : null, siteId)|raw }}
+                    {% endnamespace %}
+                </div>
+            {% endfor %}
+
+            {{ forms.textField({
+                label: "Label"|t('smart-links'),
+                instructions: "Leave blank to use the default text for the link."|t('smart-links'),
+                id: "#{baseId}-label",
+                name: "#{baseName}[label]",
+                value: link.label ?? null,
+                inputAttributes: {data: {'smartlinks-label': true}},
+            }) }}
+
+            <button type="button" class="fieldtoggle" data-target="{{ baseId }}-advanced">{{ "Advanced"|t('smart-links') }}</button>
+            <div id="{{ baseId }}-advanced" class="smartlinks-link__advanced hidden">
+                {{ _self.feature('urlSuffix', features, forms.textField({
+                    label: "URL suffix"|t('smart-links'),
+                    instructions: "A query string or fragment added to the URL, starting with “?” or “#”."|t('smart-links'),
+                    id: "#{baseId}-url-suffix",
+                    disabled: 'urlSuffix' not in features,
+                    name: "#{baseName}[urlSuffix]",
+                    value: link.urlSuffix ?? null,
+                    class: 'code',
+                })) }}
+
+                {% set target = link.target ?? null %}
+                {% set targetOptions = [
+                    {label: "Same window"|t('smart-links'), value: ''},
+                    {label: "New window or tab"|t('smart-links') ~ ' (_blank)', value: '_blank'},
+                    {label: '_self', value: '_self'},
+                    {label: '_parent', value: '_parent'},
+                    {label: '_top', value: '_top'},
+                ] %}
+                {% if target and target not in ['_blank', '_self', '_parent', '_top'] %}
+                    {% set targetOptions = targetOptions|merge([{label: target, value: target}]) %}
+                {% endif %}
+                {{ _self.feature('target', features, forms.selectField({
+                    label: "Target"|t('smart-links'),
+                    id: "#{baseId}-target",
+                    disabled: 'target' not in features,
+                    name: "#{baseName}[attributes][target]",
+                    options: targetOptions,
+                    value: target ?? '',
+                })) }}
+
+                {{ _self.feature('rel', features, forms.textField({
+                    label: "Relationship (rel)"|t('smart-links'),
+                    instructions: "Separate values with spaces, e.g. “nofollow sponsored”."|t('smart-links'),
+                    id: "#{baseId}-rel",
+                    disabled: 'rel' not in features,
+                    name: "#{baseName}[attributes][rel]",
+                    value: link.rel ?? null,
+                    class: 'code',
+                })) }}
+
+                {{ _self.feature('title', features, forms.textField({
+                    label: "Title text"|t('smart-links'),
+                    id: "#{baseId}-title-text",
+                    disabled: 'title' not in features,
+                    name: "#{baseName}[attributes][title]",
+                    value: link.title ?? null,
+                })) }}
+
+                {{ _self.feature('class', features, forms.textField({
+                    label: "CSS classes"|t('smart-links'),
+                    instructions: "Separate class names with spaces."|t('smart-links'),
+                    id: "#{baseId}-class",
+                    disabled: 'class' not in features,
+                    name: "#{baseName}[attributes][class]",
+                    value: link.class ?? null,
+                    class: 'code',
+                })) }}
+
+                {{ _self.feature('id', features, forms.textField({
+                    label: "ID"|t('smart-links'),
+                    id: "#{baseId}-html-id",
+                    disabled: 'id' not in features,
+                    name: "#{baseName}[attributes][id]",
+                    value: link.id ?? null,
+                    class: 'code',
+                })) }}
+
+                {{ _self.feature('ariaLabel', features, forms.textField({
+                    label: "ARIA label"|t('smart-links'),
+                    instructions: "What assistive technology announces instead of the link text."|t('smart-links'),
+                    id: "#{baseId}-aria-label",
+                    disabled: 'ariaLabel' not in features,
+                    name: "#{baseName}[attributes][ariaLabel]",
+                    value: link.ariaLabel ?? null,
+                })) }}
+
+                {% set download = link.download ?? false %}
+                {{ _self.feature('download', features, forms.checkboxField({
+                    label: "Download the link target instead of opening it"|t('smart-links'),
+                    id: "#{baseId}-download",
+                    name: "#{baseName}[attributes][download]",
+                    checked: download,
+                    disabled: 'download' not in features,
+                    inputAttributes: {data: {'smartlinks-download': true}},
+                }) ~ tag('div', {
+                    class: download ? null : 'hidden',
+                    data: {'smartlinks-filename': true},
+                    html: forms.textField({
+                        label: "Download filename"|t('smart-links'),
+                        instructions: "Leave blank to keep the file’s own name."|t('smart-links'),
+                        id: "#{baseId}-download-filename",
+                        name: "#{baseName}[attributes][downloadFilename]",
+                        value: link.downloadFilename ?? null,
+                        disabled: not download or 'download' not in features,
+                    }),
+                })) }}
+
+                {# A group of rows, so a fieldset with a legend names it; each input is labelled itself. #}
+                {% set customRowsHtml %}
+                    <fieldset class="field smartlinks-link__custom" aria-describedby="{{ baseId }}-custom-instructions">
+                        <legend class="h6">{{ "Custom attributes"|t('smart-links') }}</legend>
+                        <p class="instructions" id="{{ baseId }}-custom-instructions">{{ "Only data-* and aria-* attributes are allowed."|t('smart-links') }}</p>
+                        <div data-smartlinks-custom-rows data-next-row="{{ (link.custom ?? [])|length }}">
+                            {% for row in link.custom ?? [] %}
+                                {% include 'smart-links/_field/custom-row' with {
+                                    name: name,
+                                    id: id,
+                                    key: key,
+                                    index: loop.index0,
+                                    row: row,
+                                    disabled: 'custom' not in features,
+                                } only %}
+                            {% endfor %}
+                        </div>
+                        <button type="button" class="btn small add icon" data-smartlinks-add-row>{{ "Add an attribute"|t('smart-links') }}</button>
+                    </fieldset>
+                {% endset %}
+                {{ _self.feature('custom', features, customRowsHtml) }}
+            </div>
+        {% endif %}
+    </div>
+</div>

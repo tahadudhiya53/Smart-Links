@@ -1,0 +1,76 @@
+{% import '_includes/forms' as forms %}
+
+{% if typeOptions is empty %}
+    <p class="warning with-icon">{{ "No link types are registered yet. Link types are provided by plugins and modules."|t('smart-links') }}</p>
+{% endif %}
+
+{{ forms.checkboxSelectField({
+    label: "Allowed link types"|t('smart-links'),
+    instructions: "The kinds of link authors can add. Drag to change the order they are offered in."|t('smart-links'),
+    id: 'types',
+    name: 'types',
+    options: typeOptions,
+    values: field.types,
+    sortable: true,
+    required: true,
+    errors: field.getErrors('types'),
+}) }}
+
+{% if presetOptions is empty %}
+    {{ forms.field({
+        label: "Allowed presets"|t('smart-links'),
+        instructions: "No link presets are defined, so links in this field are made without one."|t('smart-links'),
+    }, '') }}
+{% else %}
+    {{ forms.checkboxSelectField({
+        label: "Allowed presets"|t('smart-links'),
+        instructions: "The presets authors can make links with. With none chosen, links are made without one."|t('smart-links'),
+        id: 'presets',
+        name: 'presets',
+        options: presetOptions,
+        values: field.presets,
+        sortable: true,
+        errors: field.getErrors('presets'),
+    }) }}
+{% endif %}
+
+{{ forms.lightswitchField({
+    label: "Allow multiple links"|t('smart-links'),
+    instructions: "When off, the field holds a single link."|t('smart-links'),
+    id: 'multiple',
+    name: 'multiple',
+    on: field.multiple,
+    toggle: 'smartlinks-limits',
+}) }}
+
+<div id="smartlinks-limits"{% if not field.multiple %} class="hidden"{% endif %}>
+    {{ forms.textField({
+        label: "Minimum links"|t('smart-links'),
+        instructions: "The fewest links a live element may have, if it has any. Use the field’s “Required” setting to require links."|t('smart-links'),
+        id: 'minLinks',
+        name: 'minLinks',
+        type: 'number',
+        min: 0,
+        size: 5,
+        value: field.minLinks,
+        errors: field.getErrors('minLinks'),
+    }) }}
+
+    {{ forms.textField({
+        label: "Maximum links"|t('smart-links'),
+        instructions: "Leave blank for no limit."|t('smart-links'),
+        id: 'maxLinks',
+        name: 'maxLinks',
+        type: 'number',
+        min: 1,
+        size: 5,
+        value: field.maxLinks,
+        errors: field.getErrors('maxLinks'),
+    }) }}
+</div>
+
+{{ forms.field({
+    label: "Default links"|t('smart-links'),
+    instructions: "The links new elements start with. Each element gets its own copy."|t('smart-links'),
+    errors: field.getErrors('defaultLinks'),
+}, defaultLinksHtml) }}
