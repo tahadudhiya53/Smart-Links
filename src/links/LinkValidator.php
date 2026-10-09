@@ -140,8 +140,8 @@ final class LinkValidator
             $errors[] = new ValidationError(ValidationError::join($path, 'label'), Code::INVALID, 'The label must be non-empty text without control characters.');
         }
 
-        if ($urlSuffix !== null && !preg_match('/^[?#]' . self::TOKEN_CHARACTER . '+$/u', $urlSuffix)) {
-            $errors[] = new ValidationError(ValidationError::join($path, 'urlSuffix'), Code::INVALID, 'A URL suffix must start with “?” or “#”, continue after it, and contain no whitespace.');
+        if ($urlSuffix !== null) {
+            array_push($errors, ...$this->validateUrlSuffix($urlSuffix, ValidationError::join($path, 'urlSuffix')));
         }
 
         array_push($errors, ...$this->validateAttributes($attributes, $type, ValidationError::join($path, 'attributes')));
@@ -151,6 +151,21 @@ final class LinkValidator
         }
 
         return $errors;
+    }
+
+    /**
+     * The rule for a URL suffix, whichever link it is for: it starts with `?` or `#`, continues
+     * after it, and has no whitespace or control characters.
+     *
+     * @return list<ValidationError>
+     */
+    public function validateUrlSuffix(string $urlSuffix, string $path = ''): array
+    {
+        if (!preg_match('/^[?#]' . self::TOKEN_CHARACTER . '+$/u', $urlSuffix)) {
+            return [new ValidationError($path, Code::INVALID, 'A URL suffix must start with “?” or “#”, continue after it, and contain no whitespace.')];
+        }
+
+        return [];
     }
 
     /**

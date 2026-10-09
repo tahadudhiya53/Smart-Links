@@ -13,6 +13,7 @@ use craft\models\GqlSchema;
 use PHPUnit\Framework\TestCase;
 use Tahadudhiya\SmartLinks\fields\SmartLinkField;
 use Tahadudhiya\SmartLinks\models\LinkCollection;
+use Tahadudhiya\SmartLinks\services\Presets;
 use Tahadudhiya\SmartLinks\SmartLinks;
 use Tahadudhiya\SmartLinks\Tests\_support\ElementFixture;
 use Tahadudhiya\SmartLinks\Tests\_support\FieldFixture;
@@ -287,6 +288,66 @@ final class GraphqlTest extends TestCase
         self::assertArrayNotHasKey('errors', $result, Json::encode(array_column($result['errors'] ?? [], 'message')));
         self::assertCount(0, Entry::find()->id($entry->id)->one()?->getFieldValue(self::ALL) ?? [1]);
         self::assertSame([], array_map('intval', Entry::find()->relatedTo($target)->ids()));
+    }
+
+    public function testAMutationCannotGiveALinkADisabledPresetButKeepsOneALinkHas(): void
+    {
+        $entry = self::savedEntry('gql-preset', [self::LINKS => [['type' => 'url', 'data' => ['url' => 'https://example.com/kept'], 'presetUid' => self::PRIMARY]]]);
+        $kept = $entry->getFieldValue(self::LINKS)->links[0]->uid;
+        $mutation = 'mutation($id: ID, $links: [SmartLinkInput!]) { save_' . self::SECTION . '_smartLinksTestPage_Entry(id: $id, ' . self::LINKS . ': $links) { id } }';
+        $save = static fn(array $links): array => self::execute(self::schema(mutations: true), $mutation, ['id' => (string)$entry->id, 'links' => $links]);
+        $projectConfig = Craft::$app->getProjectConfig();
+        $projectConfig->set(Presets::CONFIG_KEY . '.' . self::PRIMARY . '.enabled', false);
+
+        try {
+            // A new link given the disabled preset is refused, and nothing changes.
+            $result = $save([
+                ['uid' => $kept, 'type' => 'url', 'data' => '{"url": "https://example.com/kept"}', 'presetUid' => self::PRIMARY],
+                ['type' => 'url', 'data' => '{"url": "https://example.com/new"}', 'presetUid' => self::PRIMARY],
+            ]);
+            self::assertStringContainsString('disabled', Json::encode($result['errors'] ?? []));
+            self::assertCount(1, Entry::find()->id($entry->id)->one()?->getFieldValue(self::LINKS) ?? []);
+
+            // The link that has it keeps it through an edit.
+            $result = $save([['uid' => $kept, 'type' => 'url', 'data' => '{"url": "https://example.com/kept"}', 'label' => 'Kept', 'presetUid' => self::PRIMARY]]);
+            self::assertArrayNotHasKey('errors', $result, Json::encode($result['errors'] ?? []));
+            $link = Entry::find()->id($entry->id)->one()?->getFieldValue(self::LINKS)->links[0];
+            self::assertSame(['Kept', self::PRIMARY], [$link?->label, $link?->presetUid]);
+        } finally {
+            $projectConfig->set(Presets::CONFIG_KEY . '.' . self::PRIMARY . '.enabled', true);
+        }
+    }
+
+    public function testAMutationCannotChangeWhatAPresetLocksNorUseOneTheFieldDoesNotAllow(): void
+    {
+        // Without the fixture's default links, which were made with Primary CTA too and would be
+        // refused by its lock as well: every refusal here is the mutated field's.
+        $entry = self::savedEntry('gql-preset-lock', [self::DEFAULTS => []]);
+        $mutation = 'mutation($id: ID, $links: [SmartLinkInput!]) { save_' . self::SECTION . '_smartLinksTestPage_Entry(id: $id, ' . self::LINKS . ': $links) { id } }';
+        $save = static fn(array $links): array => self::execute(self::schema(mutations: true), $mutation, ['id' => (string)$entry->id, 'links' => $links]);
+        $projectConfig = Craft::$app->getProjectConfig();
+        $projectConfig->set(Presets::CONFIG_KEY . '.' . self::PRIMARY . '.attributes', ['target' => '_blank']);
+        $projectConfig->set(Presets::CONFIG_KEY . '.' . self::PRIMARY . '.locked', ['target']);
+
+        try {
+            foreach ([
+                'a locked setting changed' => [['type' => 'url', 'data' => '{"url": "https://example.com/"}', 'presetUid' => self::PRIMARY, 'target' => '_top'], 'locked by the'],
+                'a locked setting left out' => [['type' => 'url', 'data' => '{"url": "https://example.com/"}', 'presetUid' => self::PRIMARY], 'locked by the'],
+                'a preset the field does not allow' => [['type' => 'url', 'data' => '{"url": "https://example.com/"}', 'presetUid' => self::SECONDARY], 'not allowed in this field'],
+                'a preset that does not exist' => [['type' => 'url', 'data' => '{"url": "https://example.com/"}', 'presetUid' => self::GONE], 'no longer exists'],
+                'a preset UID that is not one' => [['type' => 'url', 'data' => '{"url": "https://example.com/"}', 'presetUid' => 'primary'], 'not a valid UID'],
+            ] as $case => [$link, $refusal]) {
+                $result = $save([$link]);
+                self::assertStringContainsString($refusal, Json::encode($result['errors'] ?? [], JSON_UNESCAPED_UNICODE), $case);
+                self::assertCount(0, Entry::find()->id($entry->id)->one()?->getFieldValue(self::LINKS) ?? [1], $case);
+            }
+
+            $result = $save([['type' => 'url', 'data' => '{"url": "https://example.com/"}', 'presetUid' => self::PRIMARY, 'target' => '_blank']]);
+            self::assertArrayNotHasKey('errors', $result, Json::encode($result['errors'] ?? []));
+        } finally {
+            $projectConfig->remove(Presets::CONFIG_KEY . '.' . self::PRIMARY . '.attributes');
+            $projectConfig->remove(Presets::CONFIG_KEY . '.' . self::PRIMARY . '.locked');
+        }
     }
 
     public function testACommerceProductLinkReadsThroughCommercesOwnResolver(): void

@@ -90,3 +90,11 @@
   padding-inline-start: 1.2em;
   list-style: disc;
 }
+
+.smartlinks-link__locked {
+  margin-top: var(--xs, 4px);
+}
+
+.smartlinks-link [data-smartlinks-locked][readonly] {
+  background-color: var(--gray-050, #f3f7fc);
+}

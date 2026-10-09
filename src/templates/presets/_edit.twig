@@ -1,0 +1,162 @@
+{% extends "_layouts/cp" %}
+{% import "_includes/forms" as forms %}
+
+{% set title = isNew ? "New preset"|t('smart-links') : preset.name %}
+{% set selectedSubnavItem = 'presets' %}
+{% set fullPageForm = not readOnly %}
+{% set crumbs = [{label: "Link presets"|t('smart-links'), url: url('smart-links/presets')}] %}
+
+{% if readOnly %}
+    {% set contentNotice = readOnlyNotice() %}
+{% endif %}
+
+{% set attributes = preset.linkAttributes %}
+{% set target = attributes.target %}
+{% set targetOptions = [
+    {label: "Not set"|t('smart-links'), value: ''},
+    {label: "New window or tab"|t('smart-links') ~ ' (_blank)', value: '_blank'},
+    {label: '_self', value: '_self'},
+    {label: '_parent', value: '_parent'},
+    {label: '_top', value: '_top'},
+] %}
+{% if target and target not in ['_blank', '_self', '_parent', '_top'] %}
+    {% set targetOptions = targetOptions|merge([{label: target, value: target}]) %}
+{% endif %}
+
+{# Every registered type, then any the preset names that is no longer registered, so it is shown rather than dropped. #}
+{% set typeOptions = typeNames|map((name, handle) => {label: name, value: handle})|values %}
+{% for handle in preset.types|filter(h => typeNames[h] is not defined) %}
+    {% set typeOptions = typeOptions|merge([{label: "{type} (not available)"|t('smart-links', {type: handle}), value: handle}]) %}
+{% endfor %}
+
+{% block content %}
+    {% if not readOnly %}
+        {{ actionInput('smart-links/presets/save') }}
+        {{ redirectInput('smart-links/presets') }}
+        {{ hiddenInput('presetUid', preset.uid ?? '') }}
+    {% endif %}
+
+    {{ forms.textField({
+        label: "Name"|t('smart-links'),
+        instructions: "What authors choose the preset by."|t('smart-links'),
+        id: 'name',
+        name: 'name',
+        value: preset.name,
+        errors: preset.getErrors('name'),
+        autofocus: true,
+        required: true,
+        disabled: readOnly,
+    }) }}
+
+    {{ forms.lightswitchField({
+        label: "Enabled"|t('smart-links'),
+        instructions: "Whether authors are offered this preset. Links already made with it keep it when it is disabled."|t('smart-links'),
+        id: 'enabled',
+        name: 'enabled',
+        on: preset.enabled,
+        errors: preset.getErrors('enabled'),
+        disabled: readOnly,
+    }) }}
+
+    {{ forms.checkboxSelectField({
+        label: "Link types"|t('smart-links'),
+        instructions: "The link types the preset is for. With none chosen, it is for every type. Choosing the preset for a link of another type switches the link to the first of these its field offers."|t('smart-links'),
+        id: 'types',
+        name: 'types',
+        options: typeOptions,
+        values: preset.types,
+        errors: preset.getErrors('types'),
+        disabled: readOnly,
+    }) }}
+
+    <hr>
+    <h2>{{ "Defaults"|t('smart-links') }}</h2>
+    <p class="light">{{ "What a link starts with when an author chooses this preset. Only settings the link has nothing in yet are filled in, and authors can change them, unless they are locked below."|t('smart-links') }}</p>
+
+    {% if preset.getErrors('linkAttributes') %}
+        {{ forms.errorList(preset.getErrors('linkAttributes')) }}
+    {% endif %}
+
+    {{ forms.textField({
+        label: "URL suffix"|t('smart-links'),
+        instructions: "A query string or fragment added to the URL, starting with “?” or “#”."|t('smart-links'),
+        id: 'url-suffix',
+        name: 'urlSuffix',
+        value: preset.urlSuffix,
+        class: 'code',
+        errors: preset.getErrors('urlSuffix'),
+        disabled: readOnly,
+    }) }}
+
+    {{ forms.selectField({
+        label: "Target"|t('smart-links'),
+        id: 'target',
+        name: 'attributes[target]',
+        options: targetOptions,
+        value: target ?? '',
+        errors: preset.getErrors('target'),
+        disabled: readOnly,
+    }) }}
+
+    {{ forms.textField({
+        label: "Relationship (rel)"|t('smart-links'),
+        instructions: "Separate values with spaces, e.g. “nofollow sponsored”."|t('smart-links'),
+        id: 'rel',
+        name: 'attributes[rel]',
+        value: attributes.rel|join(' '),
+        class: 'code',
+        errors: preset.getErrors('rel'),
+        disabled: readOnly,
+    }) }}
+
+    {{ forms.textField({
+        label: "CSS classes"|t('smart-links'),
+        instructions: "Separate class names with spaces."|t('smart-links'),
+        id: 'class',
+        name: 'attributes[class]',
+        value: attributes.class|join(' '),
+        class: 'code',
+        errors: preset.getErrors('class'),
+        disabled: readOnly,
+    }) }}
+
+    {{ forms.lightswitchField({
+        label: "Download"|t('smart-links'),
+        instructions: "Download the link target instead of opening it."|t('smart-links'),
+        id: 'download',
+        name: 'attributes[download]',
+        on: attributes.download,
+        errors: preset.getErrors('download'),
+        disabled: readOnly,
+    }) }}
+
+    {{ forms.editableTableField({
+        label: "Custom attributes"|t('smart-links'),
+        instructions: "Only data-* and aria-* attributes are allowed."|t('smart-links'),
+        id: 'custom',
+        name: 'attributes[custom]',
+        cols: {
+            name: {heading: "Name"|t('smart-links'), type: 'singleline', code: true},
+            value: {heading: "Value"|t('smart-links'), type: 'singleline'},
+        },
+        rows: attributes.custom|map((value, name) => {name: name, value: value})|values,
+        allowAdd: not readOnly,
+        allowDelete: not readOnly,
+        allowReorder: not readOnly,
+        static: readOnly,
+        errors: preset.getErrors('custom'),
+    }) }}
+
+    <hr>
+
+    {{ forms.checkboxSelectField({
+        label: "Locked settings"|t('smart-links'),
+        instructions: "Settings links made with this preset must keep exactly as the preset sets them (or empty, if it doesn’t set them). Authors see them as read-only while the preset is chosen, and a link that differs is refused when it is saved. Links of a type without the setting are not affected."|t('smart-links'),
+        id: 'locked',
+        name: 'locked',
+        options: lockableSettings|map((name, feature) => {label: name, value: feature})|values,
+        values: preset.locked,
+        errors: preset.getErrors('locked'),
+        disabled: readOnly,
+    }) }}
+{% endblock %}

@@ -120,6 +120,24 @@ final class LinkNormalizer
     }
 
     /**
+     * Reads link attributes from authoring input on their own, exactly as they are read within a
+     * link, for settings that hold attributes for links not made yet (a preset's defaults).
+     *
+     * What could be read is returned with the problems in the input's shape. The attribute rules
+     * themselves are the validator's ({@see LinkValidator::validateAttributes()}), so attributes
+     * that break them are still returned, to be shown again with their errors.
+     *
+     * @return array{LinkAttributes, list<ValidationError>}
+     */
+    public function readAttributes(mixed $input, string $path = ''): array
+    {
+        $errors = [];
+        $attributes = $this->attributes($input, $path, $errors);
+
+        return [$attributes, $errors];
+    }
+
+    /**
      * @param list<ValidationError> $errors
      */
     private function data(LinkTypeInterface $type, mixed $input, string $path, array &$errors): ?LinkTypeDataInterface

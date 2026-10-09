@@ -128,7 +128,8 @@ class FieldController extends Controller
 
     /**
      * Clipboard text, read as untrusted input: link data in the clipboard format, every link
-     * valid by the link rules, and of a type and preset the editor offers.
+     * valid by the link rules, of a type the editor offers, and with a preset its field allows and
+     * that is enabled (a pasted link is a new one, so it cannot be given a disabled preset).
      *
      * @return LinkCollection|list<ValidationError>
      */
@@ -180,7 +181,8 @@ class FieldController extends Controller
             }
 
             $links[] = $result->value;
-            array_push($errors, ...SmartLinkField::ruleProblems($result->value, $path, $editor->types, $editor->presets, $presets));
+            // A pasted link is a new link, so it keeps no preset: a disabled one is refused.
+            array_push($errors, ...SmartLinkField::ruleProblems($result->value, $path, $editor->types, $editor->allowedPresets, $presets));
         }
 
         if ($errors !== []) {

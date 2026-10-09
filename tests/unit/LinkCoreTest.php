@@ -766,6 +766,83 @@ class LinkCoreTest extends TestCase
         }
     }
 
+    // Attributes on their own, as configuration for links not made yet (a preset's defaults)
+
+    public function testAttributesOnTheirOwnAreReadAndStoredExactlyAsWithinALink(): void
+    {
+        $input = ['target' => '_blank', 'rel' => 'NoOpener  external', 'class' => 'btn btn-primary', 'download' => '1', 'custom' => [['name' => 'data-track', 'value' => 'cta']]];
+        $link = self::normalizer()->normalizeLink(['uid' => self::UID, 'type' => 'url', 'data' => ['url' => 'https://example.com/'], 'attributes' => $input]);
+        self::assertInstanceOf(LinkValue::class, $link->value);
+
+        [$attributes, $errors] = self::normalizer()->readAttributes($input);
+        self::assertSame([], $errors);
+        self::assertEquals($link->value->attributes, $attributes);
+
+        $stored = self::serializer()->serializeAttributes($attributes);
+        self::assertSame(self::serializer()->serialize(new LinkCollection([$link->value]))['links'][0]['attributes'] ?? null, $stored);
+        // Read back through JSON, as project config hands it over.
+        self::assertEquals($attributes, self::serializer()->deserializeAttributes(json_decode((string)json_encode($stored), true)));
+        self::assertSame([], self::serializer()->serializeAttributes(new LinkAttributes()));
+        self::assertEquals(new LinkAttributes(), self::serializer()->deserializeAttributes([]));
+    }
+
+    public function testAttributesThatBreakTheRulesAreReadSoTheValidatorCanSayWhy(): void
+    {
+        [$attributes, $errors] = self::normalizer()->readAttributes(['target' => 'two words', 'rel' => 'a a', 'custom' => 'x', 'href' => '/']);
+
+        // Reading reports only the input's shape; the rules are the validator's.
+        self::assertSame([['href', Code::UNKNOWN_KEY], ['custom', Code::WRONG_TYPE]], self::summary($errors));
+        self::assertSame('two words', $attributes->target);
+        self::assertSame([['target', Code::INVALID], ['rel[1]', Code::DUPLICATE]], self::summary(self::validator()->validateAttributes($attributes, null)));
+    }
+
+    /**
+     * @return array<string, array{mixed, list<array{string, Code}>}>
+     */
+    public static function malformedStoredAttributes(): array
+    {
+        return [
+            'not an object' => ['x', [['', Code::WRONG_TYPE]]],
+            'an unknown attribute' => [['onclick' => 'x'], [['onclick', Code::UNKNOWN_KEY]]],
+            'download stored as off' => [['download' => false], [['download', Code::NOT_CANONICAL]]],
+            'an empty rel' => [['rel' => []], [['rel', Code::NOT_CANONICAL]]],
+            'custom attributes as a map' => [['custom' => ['data-x' => 'y']], [['custom', Code::WRONG_TYPE]]],
+            'a target that breaks the rules' => [['target' => 'two words'], [['target', Code::INVALID]]],
+        ];
+    }
+
+    /**
+     * @param list<array{string, Code}> $expected
+     */
+    #[DataProvider('malformedStoredAttributes')]
+    public function testStoredAttributesAreReadAsStrictlyAsAStoredLinks(mixed $stored, array $expected): void
+    {
+        try {
+            self::serializer()->deserializeAttributes($stored);
+            self::fail('Malformed stored attributes were read.');
+        } catch (LinkValidationException $exception) {
+            self::assertSame($expected, self::summary($exception->errors));
+        }
+    }
+
+    public function testAttributesThatBreakTheRulesAreNeverStored(): void
+    {
+        $this->expectException(LinkValidationException::class);
+        self::serializer()->serializeAttributes(new LinkAttributes(rel: ['Not Valid']));
+    }
+
+    public function testAUrlSuffixFollowsTheSameRuleOnItsOwn(): void
+    {
+        self::assertSame([], self::validator()->validateUrlSuffix('?utm_source=x'));
+        self::assertSame([], self::validator()->validateUrlSuffix('#team'));
+
+        foreach (['utm=x', '?', '# x', "?a\u{85}"] as $suffix) {
+            self::assertSame([['urlSuffix', Code::INVALID]], self::summary(self::validator()->validateUrlSuffix($suffix, 'urlSuffix')), $suffix);
+            $link = self::normalizer()->normalizeLink(['type' => 'url', 'data' => ['url' => 'https://example.com/'], 'urlSuffix' => $suffix]);
+            self::assertSame([['urlSuffix', Code::INVALID]], self::summary($link->errors), $suffix);
+        }
+    }
+
     // Resolved and rendered stages
 
     public function testAResolvedLinkRendersWithItsAttributesInOrder(): void

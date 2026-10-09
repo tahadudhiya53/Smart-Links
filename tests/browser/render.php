@@ -13,10 +13,12 @@ use Tahadudhiya\SmartLinks\fields\SmartLinkField;
 use Tahadudhiya\SmartLinks\models\InvalidLinkValue;
 use Tahadudhiya\SmartLinks\models\LinkCollection;
 use Tahadudhiya\SmartLinks\services\LinkTypes;
+use Tahadudhiya\SmartLinks\services\Presets;
 use Tahadudhiya\SmartLinks\SmartLinks;
 use Tahadudhiya\SmartLinks\Tests\_support\linktypes\FakeEmailType;
 use Tahadudhiya\SmartLinks\Tests\_support\linktypes\FakeEntryType;
 use Tahadudhiya\SmartLinks\Tests\_support\linktypes\FakeUrlType;
+use Tahadudhiya\SmartLinks\Tests\_support\ProjectConfigSandbox;
 use yii\base\Event;
 
 require __DIR__ . '/../integration-bootstrap.php';
@@ -66,7 +68,45 @@ try {
     $html .= $view->namespaceInputs(fn() => $unreadable->getInputHtml(InvalidLinkValue::fromStorage($stored, $exception->errors), null), 'fields');
 }
 
+// A field with presets, defined where Smart Links reads them for this render only: project
+// config is changed in memory, never saved.
+ProjectConfigSandbox::open();
+$projectConfig = Craft::$app->getProjectConfig();
+$projectConfig->remove(Presets::CONFIG_KEY);
+$presets = [
+    // For URL links: a new window, which it locks, and rel values.
+    'e1a2b3c4-d5e6-4f70-8a9b-0c1d2e3f4a5b' => ['name' => 'External', 'sortOrder' => 1, 'types' => ['url'], 'attributes' => ['target' => '_blank', 'rel' => ['external', 'noopener']], 'locked' => ['target']],
+    // For any link: a class, a URL suffix and a custom attribute, none locked.
+    'f2b3c4d5-e6f7-4a81-9b0c-1d2e3f4a5b6c' => ['name' => 'Tracked', 'sortOrder' => 2, 'urlSuffix' => '?ref=site', 'attributes' => ['class' => ['cta'], 'custom' => [['name' => 'data-track', 'value' => 'cta']]]],
+    // For URL links: download, locked on.
+    'a3c4d5e6-f7a8-4b92-8c1d-2e3f4a5b6c7d' => ['name' => 'Download', 'sortOrder' => 3, 'types' => ['url'], 'attributes' => ['download' => true], 'locked' => ['download']],
+    // Disabled since a link was made with it: a class, locked.
+    'b4d5e6f7-a8b9-4ca3-9d2e-3f4a5b6c7d8e' => ['name' => 'Retired', 'sortOrder' => 4, 'enabled' => false, 'attributes' => ['class' => ['old']], 'locked' => ['class']],
+];
+
+foreach ($presets as $uid => $definition) {
+    $projectConfig->set(Presets::CONFIG_KEY . ".$uid", $definition);
+}
+
+$withPresets = new SmartLinkField(['handle' => 'preset', 'name' => 'Preset', 'uid' => StringHelper::UUID(), 'types' => ['url', 'email'], 'presets' => array_keys($presets)]);
+$presetValue = SmartLinks::getInstance()->getLinks()->getNormalizer()->normalize([
+    // Made with External, with its locked target, and a rel of its author's own.
+    ['uid' => '44444444-4444-4444-8444-444444444444', 'type' => 'url', 'data' => ['url' => 'https://example.com/made'], 'label' => 'Made', 'presetUid' => 'e1a2b3c4-d5e6-4f70-8a9b-0c1d2e3f4a5b', 'attributes' => ['target' => '_blank', 'rel' => 'nofollow']],
+    // No preset, with a class of its own.
+    ['uid' => '55555555-5555-4555-8555-555555555555', 'type' => 'url', 'data' => ['url' => 'https://example.com/own'], 'label' => 'Own', 'attributes' => ['class' => 'mine']],
+    // Made with Retired before it was disabled.
+    ['uid' => '66666666-6666-4666-8666-666666666666', 'type' => 'url', 'data' => ['url' => 'https://example.com/retired'], 'label' => 'Retired link', 'presetUid' => 'b4d5e6f7-a8b9-4ca3-9d2e-3f4a5b6c7d8e', 'attributes' => ['class' => 'old']],
+])->value;
+
+if (!$presetValue instanceof LinkCollection) {
+    fwrite(STDERR, "The preset editor's value is not valid.\n");
+    exit(1);
+}
+
+$html .= $view->namespaceInputs(fn() => $withPresets->getInputHtml($presetValue, null), 'fields');
+
 $js = (string)$view->clearJsBuffer(false);
+ProjectConfigSandbox::close();
 
 // What the controller renders for a pasted link, for the same editor.
 $view->setNamespace('fields');
