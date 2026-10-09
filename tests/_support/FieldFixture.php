@@ -71,7 +71,6 @@ trait FieldFixture
     protected const GONE = '8c5a1d3e-4b6f-4a0c-9e9d-3f4a5b6c7d8e';
 
     private static Transaction $transaction;
-    private static bool $writeYaml;
     protected static int $primarySiteId;
     protected static int $secondSiteId;
     protected static EntryType $entryType;
@@ -117,8 +116,7 @@ trait FieldFixture
         }
 
         $projectConfig = Craft::$app->getProjectConfig();
-        self::$writeYaml = $projectConfig->writeYamlAutomatically;
-        $projectConfig->writeYamlAutomatically = false;
+        ProjectConfigSandbox::open();
 
         if (static::usesTestTypes()) {
             Event::on(LinkTypes::class, LinkTypes::EVENT_REGISTER_LINK_TYPES, [self::class, 'registerTestTypes']);
@@ -128,9 +126,11 @@ trait FieldFixture
 
         self::$transaction = Craft::$app->getDb()->beginTransaction();
 
-        // Presets are configuration: defined where Smart Links reads them.
-        $projectConfig->set(Presets::CONFIG_KEY . '.' . self::PRIMARY, ['name' => 'Primary CTA']);
-        $projectConfig->set(Presets::CONFIG_KEY . '.' . self::SECONDARY, ['name' => 'Secondary CTA']);
+        // Presets are configuration: defined where Smart Links reads them, in place of any the
+        // host project has, so tests do not depend on them.
+        $projectConfig->remove(Presets::CONFIG_KEY);
+        $projectConfig->set(Presets::CONFIG_KEY . '.' . self::PRIMARY, ['name' => 'Primary CTA', 'sortOrder' => 1]);
+        $projectConfig->set(Presets::CONFIG_KEY . '.' . self::SECONDARY, ['name' => 'Secondary CTA', 'sortOrder' => 2]);
 
         self::$primarySiteId = (int)Craft::$app->getSites()->getPrimarySite()->id;
         self::$secondSiteId = self::createSite();
@@ -180,16 +180,7 @@ trait FieldFixture
             Craft::$app->set($id, $components[$id]);
         }
 
-        Craft::$app->getProjectConfig()->reset();
-        Craft::$app->getProjectConfig()->writeYamlAutomatically = self::$writeYaml;
-
-        // Craft holds the project config lock from the first change until the changes are saved
-        // when a request ends. None ends here, and the rolled-back changes must not be saved, so
-        // the lock is released as that save would release it; otherwise any other process (e.g.
-        // a test's subprocess) waits for it. The flag is the service's own record of holding it.
-        $projectConfig = Craft::$app->getProjectConfig();
-        Craft::$app->getMutex()->release(\craft\services\ProjectConfig::MUTEX_NAME);
-        (fn() => $this->_locked = false)->call($projectConfig);
+        ProjectConfigSandbox::close();
         Craft::$app->getIsMultiSite(true);
         Craft::$app->getIsMultiSite(true, true);
     }
@@ -430,7 +421,23 @@ trait FieldFixture
      */
     protected function runFieldAction(string $action, array $params, ?TestUser $user = null, bool $withCsrf = true, string $method = 'POST', string $path = '/admin/actions/smart-links/field/'): Response
     {
-        $headers = ['Accept' => 'application/json', 'X-Requested-With' => 'XMLHttpRequest'];
+        return $this->runControllerAction(FieldController::class, 'field', $action, $params, $user, $withCsrf, $method, $path);
+    }
+
+    /**
+     * Runs a Smart Links controller action as a control panel request, with a valid CSRF token
+     * unless told otherwise, as Craft runs it for a real one: as an AJAX request asking for
+     * JSON, or as a page or form request.
+     *
+     * @param class-string<\craft\web\Controller> $class
+     * @param array<string, mixed> $params Body params, and for a GET also the action's route params.
+     */
+    protected function runControllerAction(string $class, string $id, string $action, array $params, ?TestUser $user = null, bool $withCsrf = true, string $method = 'POST', ?string $path = null, bool $json = true): Response
+    {
+        $path ??= "/admin/actions/smart-links/$id/";
+        // Each request starts without the cookies of an earlier one in the same test.
+        $_COOKIE = [];
+        $headers = $json ? ['Accept' => 'application/json', 'X-Requested-With' => 'XMLHttpRequest'] : [];
 
         // A CSRF token is issued in a cookie by one request and presented with the next.
         $this->useWebRequest($method, $path . $action, $headers);
@@ -454,9 +461,11 @@ trait FieldFixture
             }
         }
 
+        $controller = new $class($id, SmartLinks::getInstance());
+
         Craft::$app->getRequest()->setBodyParams($params);
-        $controller = new FieldController('field', SmartLinks::getInstance());
-        $response = $controller->runAction($action);
+        $response = $controller->runAction($action, $method === 'GET' ? $params : []);
+
         Assert::assertInstanceOf(Response::class, $response);
 
         return $response;

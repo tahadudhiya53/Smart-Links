@@ -112,6 +112,8 @@ class PluginTest extends TestCase
         $literal = "'((?:[^'\\\\]|\\\\.)*)'";
         $patterns = [
             "/Craft::t\\(\\s*'smart-links',\\s*$literal/",
+            // Queue job descriptions and progress labels, translated when the queue shows them.
+            "/Translation::prep\\(\\s*'smart-links',\\s*$literal/",
             // new ValidationError($path, $code, 'message'…), with any path and code expression.
             "/new ValidationError\\((?:[^,()]|\\([^()]*\\))*,(?:[^,()]|\\([^()]*\\))*,\\s*$literal/",
         ];
