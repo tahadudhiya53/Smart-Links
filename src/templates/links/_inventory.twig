@@ -1,0 +1,110 @@
+{# One page of the link inventory: its table and page links. #}
+
+{% macro sortLink(criteria, key, label) %}
+    {% set active = criteria.sort == key %}
+    {% set dir = active ? (criteria.dir == 'asc' ? 'desc' : 'asc') : null %}
+    <a href="{{ url('smart-links/links', criteria.params({sort: key, dir: dir, page: null})) }}"
+       {% if active %}aria-sort="{{ criteria.dir == 'asc' ? 'ascending' : 'descending' }}"{% endif %}>
+        {{- label -}}
+        {%- if active %} <span aria-hidden="true">{{ criteria.dir == 'asc' ? '↑' : '↓' }}</span>{% endif -%}
+    </a>
+{% endmacro %}
+
+{% if inventory.items is empty and inventory.total > 0 %}
+    <p class="zilch" id="smartlinks-inventory-past-end">
+        {{ "There is no page {page, number}: there {total, plural, =1{is one target} other{are {total, number} targets}} on {pages, number} {pages, plural, =1{page} other{pages}}."|t('smart-links', {page: inventory.page, total: inventory.total, pages: inventory.pageCount()}) }}
+        <a href="{{ url('smart-links/links', criteria.params({page: null})) }}">{{ "Go to the first page"|t('smart-links') }}</a>
+    </p>
+{% elseif inventory.items is empty %}
+    <p class="zilch">
+        {{ criteria.isFiltered()
+            ? "No links match these filters."|t('smart-links')
+            : "No links have been indexed yet."|t('smart-links') }}
+    </p>
+{% else %}
+    <div class="tableview">
+        <div class="tablepane">
+            <table class="data fullwidth" id="smartlinks-inventory">
+                <thead>
+                    <tr>
+                        <th scope="col">{{ _self.sortLink(criteria, 'link', "Link"|t('smart-links')) }}</th>
+                        <th scope="col">{{ _self.sortLink(criteria, 'type', "Link type"|t('smart-links')) }}</th>
+                        <th scope="col">{{ "Label"|t('smart-links') }}</th>
+                        <th scope="col">{{ "Source"|t('smart-links') }}</th>
+                        {% if craft.app.isMultiSite %}<th scope="col">{{ "Sites"|t('smart-links') }}</th>{% endif %}
+                        <th scope="col">{{ _self.sortLink(criteria, 'usage', "Usage"|t('smart-links')) }}</th>
+                        <th scope="col">{{ _self.sortLink(criteria, 'health', "Health"|t('smart-links')) }}</th>
+                        <th scope="col">{{ _self.sortLink(criteria, 'checked', "Last checked"|t('smart-links')) }}</th>
+                        <th scope="col">{{ _self.sortLink(criteria, 'target', "Target"|t('smart-links')) }}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in inventory.items %}
+                        <tr data-id="{{ item.id }}">
+                            <th scope="row">
+                                {% if item.targetLabel %}<div>{{ item.targetLabel }}</div>{% endif %}
+                                {% if item.checkUrl %}
+                                    <a href="{{ item.checkUrl }}" class="go smalltext" rel="noopener noreferrer" target="_blank">{{ item.resolvedUrl }}</a>
+                                {% elseif item.resolvedUrl %}
+                                    <code class="smalltext">{{ item.resolvedUrl }}</code>
+                                {% elseif not item.targetLabel %}
+                                    <code class="smalltext light">{{ item.targetKey }}</code>
+                                {% endif %}
+                            </th>
+                            <td>{{ item.typeName }}</td>
+                            <td>
+                                {% if item.label %}
+                                    {{ item.label }}
+                                    {% if item.labelCount > 1 %}<span class="light">{{ "+{count, number} more"|t('smart-links', {count: item.labelCount - 1}) }}</span>{% endif %}
+                                {% else %}
+                                    <span class="light">{{ "No label"|t('smart-links') }}</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if item.source %}
+                                    {% if item.source.url %}<a href="{{ item.source.url }}">{{ item.source.label }}</a>{% else %}{{ item.source.label }}{% endif %}
+                                {% endif %}
+                                {% if item.sourceCount > 1 %}<span class="light">{{ "+{count, number} more"|t('smart-links', {count: item.sourceCount - 1}) }}</span>{% endif %}
+                            </td>
+                            {% if craft.app.isMultiSite %}<td>{{ item.siteNames|map(name => name|t('site'))|join(', ') }}</td>{% endif %}
+                            <td>
+                                {% if canViewUsage %}
+                                    <a href="{{ url('smart-links/links/' ~ item.id) }}" aria-label="{{ "Where it is used ({count, number})"|t('smart-links', {count: item.usageCount}) }}">{{ "{count, number}"|t('smart-links', {count: item.usageCount}) }}</a>
+                                {% else %}
+                                    {{ "{count, number}"|t('smart-links', {count: item.usageCount}) }}
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if item.health %}
+                                    <span class="status-label {{ {healthy: 'green', redirect: 'blue', broken: 'red', unavailable: 'orange', blocked: 'orange'}[item.health.value] ?? 'gray' }}" data-health="{{ item.health.value }}">
+                                        <span class="status"></span><span class="status-label-text">{{ item.health.label() }}</span>
+                                    </span>
+                                {% else %}
+                                    <span class="light" data-health="none">{{ "Can’t be checked"|t('smart-links') }}</span>
+                                {% endif %}
+                            </td>
+                            <td>{{ item.dateChecked ? item.dateChecked|datetime('short') : ("Never"|t('smart-links')) }}</td>
+                            <td data-target="{{ item.targetStatus ?? 'failed' }}">{{ item.targetState() ? item.targetState().label() : "Couldn’t be resolved"|t('smart-links') }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <nav class="flex pagination" aria-label="{{ "Pages"|t('smart-links') }}" id="smartlinks-inventory-pages">
+        {% if inventory.page > 1 %}
+            <a class="page-link prev-page" rel="prev" href="{{ url('smart-links/links', criteria.params({page: inventory.page - 1 > 1 ? inventory.page - 1 : null})) }}" title="{{ 'Previous Page'|t('app') }}"></a>
+        {% endif %}
+        {% if inventory.page < inventory.pageCount() %}
+            <a class="page-link next-page" rel="next" href="{{ url('smart-links/links', criteria.params({page: inventory.page + 1})) }}" title="{{ 'Next Page'|t('app') }}"></a>
+        {% endif %}
+        <div class="page-info">
+            {{ "{first, number}–{last, number} of {total, number} {total, plural, =1{target} other{targets}}"|t('smart-links', {
+                first: inventory.first(),
+                last: inventory.last(),
+                total: inventory.total,
+            }) }}
+        </div>
+    </nav>
+{% endif %}

@@ -17,6 +17,8 @@ use craft\db\ActiveRecord;
  * @property int|null $targetElementId
  * @property int|null $targetSiteId
  * @property string|null $resolvedUrl
+ * @property string|null $targetLabel
+ * @property string|null $targetStatus
  * @property string|null $healthUrlHash
  * @property string $dateCreated
  * @property string $dateUpdated

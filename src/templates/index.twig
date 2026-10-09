@@ -2,6 +2,7 @@
 
 {% set plugin = craft.app.plugins.getPlugin('smart-links') %}
 {% set title = plugin.name %}
+{% set selectedSubnavItem = 'overview' %}
 
 {% block content %}
     <p>{{ "Smart Links is installed and running."|t('smart-links') }}</p>
