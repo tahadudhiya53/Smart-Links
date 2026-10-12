@@ -1,0 +1,111 @@
+{% extends "_layouts/cp" %}
+
+{% set title = "Links"|t('smart-links') %}
+{% set selectedSubnavItem = 'links' %}
+
+{% block content %}
+    {% set sourceHandle = criteria.params().source ?? null %}
+    {% if status.isStale() %}
+        <div class="readable" id="smartlinks-index-status">
+            <p class="warning with-icon">
+                {{ "The link index is behind content, so the inventory may be incomplete or out of date."|t('smart-links') }}
+            </p>
+            <ul class="bullets">
+                {% if status.unindexedSources %}<li>{{ "{count, number} {count, plural, =1{element site was} other{element sites were}} saved since it was indexed, or never indexed"|t('smart-links', {count: status.unindexedSources}) }}</li>{% endif %}
+                {% if status.unreadableSources %}<li>{{ "{count, number} {count, plural, =1{element site has} other{element sites have}} a value that can’t be read, so {count, plural, =1{its} other{their}} links are as last read"|t('smart-links', {count: status.unreadableSources}) }}</li>{% endif %}
+                {% if status.orphanedSources %}<li>{{ "{count, number} indexed {count, plural, =1{element site is} other{element sites are}} no longer in use"|t('smart-links', {count: status.orphanedSources}) }}</li>{% endif %}
+                {% if status.orphanedUsages %}<li>{{ "{count, number} indexed link {count, plural, =1{occurrence is} other{occurrences are}} no longer in content"|t('smart-links', {count: status.orphanedUsages}) }}</li>{% endif %}
+                {% if status.unusedTargets %}<li>{{ "{count, number} {count, plural, =1{target is} other{targets are}} no longer linked to"|t('smart-links', {count: status.unusedTargets}) }}</li>{% endif %}
+                {% if status.outdatedTargets %}<li>{{ "{count, number} {count, plural, =1{target leads} other{targets lead}} to an element or site that is gone"|t('smart-links', {count: status.outdatedTargets}) }}</li>{% endif %}
+            </ul>
+        </div>
+    {% endif %}
+
+    <form method="get" action="{{ url('smart-links/links') }}" class="flex flex-wrap" id="smartlinks-inventory-filters" role="search">
+        {% if criteria.sort != 'usage' %}<input type="hidden" name="sort" value="{{ criteria.sort }}">{% endif %}
+        {% if criteria.dir != constant('Tahadudhiya\\SmartLinks\\models\\InventoryCriteria::SORTS')[criteria.sort] %}<input type="hidden" name="dir" value="{{ criteria.dir }}">{% endif %}
+
+        <div class="flex-grow texticon search icon">
+            <input type="search" class="text fullwidth" name="search" value="{{ criteria.search }}" maxlength="255"
+                   placeholder="{{ "Search URLs, targets and labels"|t('smart-links') }}"
+                   aria-label="{{ "Search URLs, targets and labels"|t('smart-links') }}">
+        </div>
+
+        {% if craft.app.isMultiSite %}
+            <div class="select">
+                <select name="sourceSite" aria-label="{{ 'Site'|t('app') }}">
+                    <option value="">{{ "All sites"|t('smart-links') }}</option>
+                    {% for site in craft.app.sites.getAllSites(true) %}
+                        <option value="{{ site.handle }}" {{ criteria.siteId == site.id ? 'selected' }}>{{ site.name|t('site') }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+        {% endif %}
+
+        <div class="select">
+            <select name="type" aria-label="{{ "Link type"|t('smart-links') }}">
+                <option value="">{{ "All link types"|t('smart-links') }}</option>
+                {% for handle, name in typeOptions %}
+                    <option value="{{ handle }}" {{ criteria.type == handle ? 'selected' }}>{{ name }}</option>
+                {% endfor %}
+                {% if criteria.type and criteria.type not in typeOptions|keys %}
+                    <option value="{{ criteria.type }}" selected>{{ criteria.type }}</option>
+                {% endif %}
+            </select>
+        </div>
+
+        <div class="select">
+            <select name="source" aria-label="{{ "Source field"|t('smart-links') }}">
+                <option value="">{{ "All fields"|t('smart-links') }}</option>
+                {% for handle, name in sourceOptions %}
+                    <option value="{{ handle }}" {{ sourceHandle == handle ? 'selected' }}>{{ name|t('site') }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="select">
+            <select name="health" aria-label="{{ "Health"|t('smart-links') }}">
+                <option value="">{{ "Any health"|t('smart-links') }}</option>
+                {% for state in healthStates %}
+                    <option value="{{ state.value }}" {{ criteria.health == state.value ? 'selected' }}>{{ state.label() }}</option>
+                {% endfor %}
+                <option value="none" {{ criteria.health == 'none' ? 'selected' }}>{{ "Can’t be checked"|t('smart-links') }}</option>
+            </select>
+        </div>
+
+        <div class="select">
+            <select name="target" aria-label="{{ "Target"|t('smart-links') }}">
+                <option value="">{{ "Any target state"|t('smart-links') }}</option>
+                {% for state in targetStates %}
+                    <option value="{{ state.value }}" {{ criteria.target == state.value ? 'selected' }}>{{ state.label() }}</option>
+                {% endfor %}
+                <option value="failed" {{ criteria.target == 'failed' ? 'selected' }}>{{ "Couldn’t be resolved"|t('smart-links') }}</option>
+            </select>
+        </div>
+
+        <button type="submit" class="btn">{{ "Filter"|t('smart-links') }}</button>
+        {% if criteria.isFiltered() %}
+            <a class="btn" href="{{ url('smart-links/links') }}">{{ "Clear"|t('smart-links') }}</a>
+        {% endif %}
+    </form>
+
+    {% include 'smart-links/links/_inventory' %}
+
+    <hr>
+    <div class="flex" id="smartlinks-index-actions">
+        <p class="light flex-grow">
+            {{ "{targets, number} {targets, plural, =1{target} other{targets}} in {usages, number} link {usages, plural, =1{occurrence} other{occurrences}}, from {sources, number} indexed element {sources, plural, =1{site} other{sites}}."|t('smart-links', {
+                targets: status.targets,
+                usages: status.usages,
+                sources: status.sources,
+            }) }}
+        </p>
+        {% if canRebuild %}
+            <form method="post">
+                {{ csrfInput() }}
+                {{ actionInput('smart-links/links/rebuild') }}
+                <button type="submit" class="btn">{{ "Rebuild index"|t('smart-links') }}</button>
+            </form>
+        {% endif %}
+    </div>
+{% endblock %}

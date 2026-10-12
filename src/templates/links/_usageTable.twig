@@ -1,0 +1,104 @@
+{# One page of a target's occurrences: its table and page links. #}
+
+{% set pageUrl = 'smart-links/links/' ~ target.id %}
+
+{% if usage.items is empty and usage.total > 0 %}
+    <p class="zilch" id="smartlinks-usage-past-end">
+        {{ "There is no page {page, number}: there {total, plural, =1{is one occurrence} other{are {total, number} occurrences}} on {pages, number} {pages, plural, =1{page} other{pages}}."|t('smart-links', {page: usage.page, total: usage.total, pages: usage.pageCount()}) }}
+        <a href="{{ url(pageUrl, criteria.params({page: null})) }}">{{ "Go to the first page"|t('smart-links') }}</a>
+    </p>
+{% elseif usage.items is empty %}
+    <p class="zilch">
+        {{ criteria.isFiltered()
+            ? "No links to this target match these filters."|t('smart-links')
+            : "No links to this target are indexed."|t('smart-links') }}
+    </p>
+{% else %}
+    <div class="tableview">
+        <div class="tablepane">
+            <table class="data fullwidth" id="smartlinks-usage">
+                <thead>
+                    <tr>
+                        <th scope="col">{{ "Source"|t('smart-links') }}</th>
+                        <th scope="col">{{ "Element type"|t('smart-links') }}</th>
+                        <th scope="col">{{ "Field"|t('smart-links') }}</th>
+                        {% if craft.app.isMultiSite %}<th scope="col">{{ 'Site'|t('app') }}</th>{% endif %}
+                        <th scope="col">{{ "Position"|t('smart-links') }}</th>
+                        <th scope="col">{{ "Label"|t('smart-links') }}</th>
+                        <th scope="col">{{ "Index"|t('smart-links') }}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for occurrence in usage.items %}
+                        <tr data-usage="{{ occurrence.key() }}">
+                            <th scope="row">
+                                {% if occurrence.path is empty %}
+                                    {{ "Element {id}"|t('smart-links', {id: occurrence.elementId}) }}
+                                {% else %}
+                                    {% for step in occurrence.path %}
+                                        {% if step.via %}<span class="light">{{ step.via|t('site') }} ›</span>{% endif %}
+                                        {% if step.url %}<a href="{{ step.url }}">{{ step.label }}</a>{% else %}<span>{{ step.label }}</span>{% endif %}
+                                        {% if not loop.last %}<span class="light" aria-hidden="true">›</span>{% endif %}
+                                    {% endfor %}
+                                {% endif %}
+                            </th>
+                            <td>
+                                {% if occurrence.elementTypeName is not null %}
+                                    {{ occurrence.elementTypeName }}
+                                {% else %}
+                                    <span class="light">{{ "{type} (not available)"|t('smart-links', {type: occurrence.elementType}) }}</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if occurrence.fieldName is not null %}
+                                    {{ occurrence.fieldName|t('site') }} <code class="smalltext light">{{ occurrence.fieldHandle }}</code>
+                                {% elseif occurrence.recordedFieldName is not null %}
+                                    {# Not the place it was in: the field that was there, wherever it is now. #}
+                                    <span class="light">{{ "Recorded as {name}"|t('smart-links', {name: occurrence.recordedFieldName|t('site')}) }}</span> <code class="smalltext light">{{ occurrence.recordedFieldHandle }}</code>
+                                {% else %}
+                                    <span class="light">{{ "Field {id} (deleted)"|t('smart-links', {id: occurrence.fieldId}) }}</span>
+                                {% endif %}
+                            </td>
+                            {% if craft.app.isMultiSite %}
+                                <td>
+                                    {% if occurrence.siteName is not null %}
+                                        {{ occurrence.siteName|t('site') }}
+                                    {% else %}
+                                        <span class="light">{{ "Site {id} (deleted)"|t('smart-links', {id: occurrence.siteId}) }}</span>
+                                    {% endif %}
+                                </td>
+                            {% endif %}
+                            <td>{{ "Link {n, number}"|t('smart-links', {n: occurrence.position}) }}</td>
+                            <td>
+                                {% if occurrence.label is not null %}{{ occurrence.label }}{% else %}<span class="light">{{ "No label"|t('smart-links') }}</span>{% endif %}
+                            </td>
+                            <td data-stale="{{ occurrence.stale ? occurrence.stale.value : 'current' }}">
+                                {% if occurrence.stale %}
+                                    <span class="warning with-icon">{{ occurrence.stale.label() }}</span>
+                                {% else %}
+                                    <span class="light">{{ "Up to date"|t('smart-links') }}</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <nav class="flex pagination" aria-label="{{ "Pages"|t('smart-links') }}" id="smartlinks-usage-pages">
+        {% if usage.page > 1 %}
+            <a class="page-link prev-page" rel="prev" href="{{ url(pageUrl, criteria.params({page: usage.page - 1 > 1 ? usage.page - 1 : null})) }}" title="{{ 'Previous Page'|t('app') }}"></a>
+        {% endif %}
+        {% if usage.page < usage.pageCount() %}
+            <a class="page-link next-page" rel="next" href="{{ url(pageUrl, criteria.params({page: usage.page + 1})) }}" title="{{ 'Next Page'|t('app') }}"></a>
+        {% endif %}
+        <div class="page-info">
+            {{ "{first, number}–{last, number} of {total, number} {total, plural, =1{occurrence} other{occurrences}}"|t('smart-links', {
+                first: usage.first(),
+                last: usage.last(),
+                total: usage.total,
+            }) }}
+        </div>
+    </nav>
+{% endif %}

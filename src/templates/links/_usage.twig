@@ -1,0 +1,80 @@
+{% extends "_layouts/cp" %}
+
+{% set title = target.targetLabel ?? target.resolvedUrl ?? target.targetKey %}
+{% set selectedSubnavItem = 'links' %}
+{% set crumbs = [{label: "Links"|t('smart-links'), url: url('smart-links/links')}] %}
+
+{% block content %}
+    {% set sourceHandle = criteria.params().source ?? null %}
+
+    <dl class="meta" id="smartlinks-target">
+        <div class="data">
+            <dt class="heading">{{ "Link type"|t('smart-links') }}</dt>
+            <dd class="value">{{ target.typeName }}</dd>
+        </div>
+        <div class="data">
+            <dt class="heading">{{ "Leads to"|t('smart-links') }}</dt>
+            <dd class="value">
+                {% if target.checkUrl %}
+                    <a href="{{ target.checkUrl }}" class="go" rel="noopener noreferrer" target="_blank">{{ target.resolvedUrl }}</a>
+                {% elseif target.resolvedUrl %}
+                    <code>{{ target.resolvedUrl }}</code>
+                {% else %}
+                    <span class="light">{{ "Nowhere"|t('smart-links') }}</span>
+                {% endif %}
+            </dd>
+        </div>
+        <div class="data">
+            <dt class="heading">{{ "Target"|t('smart-links') }}</dt>
+            <dd class="value" data-target="{{ target.targetStatus ?? 'failed' }}">{{ target.targetState() ? target.targetState().label() : "Couldn’t be resolved"|t('smart-links') }}</dd>
+        </div>
+        <div class="data">
+            <dt class="heading">{{ "Health"|t('smart-links') }}</dt>
+            <dd class="value">{{ target.health ? target.health.label() : "Can’t be checked"|t('smart-links') }}</dd>
+        </div>
+        <div class="data">
+            <dt class="heading">{{ "Usage"|t('smart-links') }}</dt>
+            <dd class="value">
+                {{ "{count, number} {count, plural, =1{occurrence} other{occurrences}} in {sources, number} {sources, plural, =1{element} other{elements}}"|t('smart-links', {
+                    count: target.usageCount,
+                    sources: target.sourceCount,
+                }) }}
+            </dd>
+        </div>
+        <div class="data">
+            <dt class="heading">{{ "Identity"|t('smart-links') }}</dt>
+            <dd class="value"><code class="smalltext">{{ target.targetKey }}</code></dd>
+        </div>
+    </dl>
+
+    <h2>{{ "Where it is used"|t('smart-links') }}</h2>
+
+    <form method="get" action="{{ url('smart-links/links/' ~ target.id) }}" class="flex flex-wrap" id="smartlinks-usage-filters">
+        {% if craft.app.isMultiSite %}
+            <div class="select">
+                <select name="sourceSite" aria-label="{{ 'Site'|t('app') }}">
+                    <option value="">{{ "All sites"|t('smart-links') }}</option>
+                    {% for site in craft.app.sites.getAllSites(true) %}
+                        <option value="{{ site.handle }}" {{ criteria.siteId == site.id ? 'selected' }}>{{ site.name|t('site') }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+        {% endif %}
+
+        <div class="select">
+            <select name="source" aria-label="{{ "Source field"|t('smart-links') }}">
+                <option value="">{{ "All fields"|t('smart-links') }}</option>
+                {% for handle, name in sourceOptions %}
+                    <option value="{{ handle }}" {{ sourceHandle == handle ? 'selected' }}>{{ name|t('site') }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <button type="submit" class="btn">{{ "Filter"|t('smart-links') }}</button>
+        {% if criteria.isFiltered() %}
+            <a class="btn" href="{{ url('smart-links/links/' ~ target.id) }}">{{ "Clear"|t('smart-links') }}</a>
+        {% endif %}
+    </form>
+
+    {% include 'smart-links/links/_usageTable' %}
+{% endblock %}

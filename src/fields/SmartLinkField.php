@@ -15,6 +15,7 @@ use craft\db\Query;
 use craft\db\Table;
 use craft\helpers\ElementHelper;
 use craft\helpers\Html;
+use craft\helpers\Json;
 use craft\helpers\StringHelper;
 use craft\web\View;
 use GraphQL\Type\Definition\Type;
@@ -27,6 +28,7 @@ use Tahadudhiya\SmartLinks\linktypes\ElementLinkTypeInterface;
 use Tahadudhiya\SmartLinks\linktypes\LinkTypeInterface;
 use Tahadudhiya\SmartLinks\models\InvalidLinkValue;
 use Tahadudhiya\SmartLinks\models\LinkCollection;
+use Tahadudhiya\SmartLinks\models\LinkPreset;
 use Tahadudhiya\SmartLinks\models\LinkValue;
 use Tahadudhiya\SmartLinks\models\ValidationError;
 use Tahadudhiya\SmartLinks\services\Links;
@@ -242,6 +244,8 @@ class SmartLinkField extends Field implements PreviewableFieldInterface, CrossSi
         foreach ($this->presets as $uid) {
             if (!isset($presets[$uid])) {
                 $this->addError($attribute, Craft::t('smart-links', '“{uid}” is not an existing preset.', ['uid' => $uid]));
+            } elseif (array_filter($this->types, static fn(string $type): bool => $presets[$uid]->isForType($type)) === []) {
+                $this->addError($attribute, Craft::t('smart-links', 'The “{preset}” preset is not for any link type this field allows.', ['preset' => $presets[$uid]->name]));
             }
         }
 
@@ -291,7 +295,7 @@ class SmartLinkField extends Field implements PreviewableFieldInterface, CrossSi
             return;
         }
 
-        $problems = array_merge($this->linkProblems($value), self::defaultLinkProblems($value));
+        $problems = array_merge($this->linkProblems($value, $this->storedDefaultPresets()), self::defaultLinkProblems($value));
 
         foreach ($problems as $error) {
             $this->addError($attribute, self::errorMessage($error));
@@ -510,6 +514,11 @@ class SmartLinkField extends Field implements PreviewableFieldInterface, CrossSi
             // until a full save.
             ['validateValue', 'on' => [Element::SCENARIO_DEFAULT, Element::SCENARIO_LIVE, Element::SCENARIO_ESSENTIALS], 'skipOnEmpty' => false],
             ['validateLinks', 'skipOnEmpty' => false],
+            // Craft saves drafts, duplicates, propagated sites and restored elements with
+            // essentials only, so the field's other rules wait for a full save. Giving a link a
+            // disabled preset is refused there too: whatever Craft stores is then something a
+            // link may keep, which is what lets a stored value show which links already had it.
+            ['validatePresetAssignments', 'on' => [Element::SCENARIO_ESSENTIALS], 'skipOnEmpty' => false],
             // Like Craft's relation fields, the minimum applies to live content with any links;
             // whether it needs links at all is the field's “required” setting.
             ['validateMinimum', 'on' => [Element::SCENARIO_LIVE]],
@@ -536,7 +545,28 @@ class SmartLinkField extends Field implements PreviewableFieldInterface, CrossSi
         $value = $element->getFieldValue($this->handle);
 
         if ($value instanceof LinkCollection) {
-            foreach ($this->linkProblems($value) as $error) {
+            foreach ($this->linkProblems($value, $this->keptPresets($value, $element)) as $error) {
+                $element->addError($this->handle, self::errorMessage($error));
+            }
+        }
+    }
+
+    public function validatePresetAssignments(ElementInterface $element): void
+    {
+        $value = $element->getFieldValue($this->handle);
+
+        if (!$value instanceof LinkCollection || !$this->hasDisabledPreset($value)) {
+            return;
+        }
+
+        $presets = $this->plugin()->getPresets()->getAllPresets();
+        $kept = $this->keptPresets($value, $element);
+
+        foreach ($value->links as $index => $link) {
+            $preset = $link->presetUid !== null ? $presets[$link->presetUid] ?? null : null;
+            $error = $preset !== null ? self::disabledPresetProblem($link, "links[$index]", $preset, $kept) : null;
+
+            if ($error !== null) {
                 $element->addError($this->handle, self::errorMessage($error));
             }
         }
@@ -556,19 +586,21 @@ class SmartLinkField extends Field implements PreviewableFieldInterface, CrossSi
 
     /**
      * What this field refuses in an otherwise valid value: links of a type it does not allow,
-     * links made with a preset it does not allow or that no longer exists, and more links than
-     * it holds. Nothing is removed or replaced; each is reported where it is.
+     * links made with a preset it does not allow, that no longer exists, that is disabled (unless
+     * the link already had it), or whose own rules they break, and more links than it holds.
+     * Nothing is removed or replaced; each is reported where it is.
      *
+     * @param array<string, list<string>> $kept The presets each link already had, by link UID, as
+     * stored (see {@see keptPresets()}): a link keeps a disabled preset it had, but none is given one.
      * @return list<ValidationError>
      */
-    public function linkProblems(LinkCollection $value): array
+    public function linkProblems(LinkCollection $value, array $kept = []): array
     {
         $problems = [];
-        $presets = null;
+        $presets = array_filter($value->links, static fn(LinkValue $link): bool => $link->presetUid !== null) !== [] ? $this->plugin()->getPresets()->getAllPresets() : [];
 
         foreach ($value->links as $index => $link) {
-            $presets ??= $link->presetUid !== null ? $this->plugin()->getPresets()->getAllPresets() : null;
-            array_push($problems, ...self::ruleProblems($link, "links[$index]", $this->types, $this->presets, $presets ?? []));
+            array_push($problems, ...self::ruleProblems($link, "links[$index]", $this->types, $this->presets, $presets, $kept));
         }
 
         $max = $this->maxCount();
@@ -582,15 +614,22 @@ class SmartLinkField extends Field implements PreviewableFieldInterface, CrossSi
 
     /**
      * What a field with these allowed types and presets refuses in one valid link: a type it
-     * does not allow, or a preset it does not allow or that no longer exists. The one statement
-     * of these rules, for a field's value and for links pasted into its editor.
+     * does not allow; a preset it does not allow or that no longer exists; or what the link's
+     * preset refuses (a type it is not for, a locked setting changed). The one statement of
+     * these rules, for a field's value and for links pasted into its editor. A disabled preset
+     * is no longer offered, but links made with it are still valid.
+     *
+     * A disabled preset is not given to any link: a link keeps one only if it already had it, as
+     * stored ($kept). Every other link with it (a new link, a pasted or duplicated one, a link
+     * given it in a form, through GraphQL or in code) is refused.
      *
      * @param list<string> $types
-     * @param list<string> $presets
+     * @param list<string> $presets UIDs of the presets the field allows.
      * @param array<string, \Tahadudhiya\SmartLinks\models\LinkPreset> $allPresets Every defined preset, by UID.
+     * @param array<string, list<string>> $kept The presets each link already had, by link UID.
      * @return list<ValidationError>
      */
-    public static function ruleProblems(LinkValue $link, string $path, array $types, array $presets, array $allPresets): array
+    public static function ruleProblems(LinkValue $link, string $path, array $types, array $presets, array $allPresets, array $kept = []): array
     {
         $problems = [];
 
@@ -604,10 +643,147 @@ class SmartLinkField extends Field implements PreviewableFieldInterface, CrossSi
                 $problems[] = new ValidationError("$path.presetUid", Code::INVALID, 'The preset this link was made with no longer exists.');
             } elseif (!in_array($link->presetUid, $presets, true)) {
                 $problems[] = new ValidationError("$path.presetUid", Code::NOT_SUPPORTED, 'The “{preset}” preset is not allowed in this field.', ['preset' => $allPresets[$link->presetUid]->name]);
+            } elseif (($disabled = self::disabledPresetProblem($link, $path, $allPresets[$link->presetUid], $kept)) !== null) {
+                $problems[] = $disabled;
+            } else {
+                // A valid link's type is registered: the link core refuses any other.
+                $type = SmartLinks::getInstance()->getLinkTypes()->getType($link->type) ?? throw new \LogicException("The link type “{$link->type}” of a valid link is not registered.");
+                array_push($problems, ...$allPresets[$link->presetUid]->linkProblems($link, $path, $type->displayName(), $type->supportedFeatures()));
             }
         }
 
         return $problems;
+    }
+
+    /**
+     * The one statement of the disabled-preset rule: a link with a disabled preset is refused
+     * unless it already had that preset, as stored.
+     *
+     * @param array<string, list<string>> $kept
+     */
+    private static function disabledPresetProblem(LinkValue $link, string $path, LinkPreset $preset, array $kept): ?ValidationError
+    {
+        if ($preset->enabled || in_array($preset->uid, $kept[$link->uid] ?? [], true)) {
+            return null;
+        }
+
+        return new ValidationError("$path.presetUid", Code::NOT_SUPPORTED, 'The “{preset}” preset is disabled, so no link can be given it. Links that already have it keep it.', ['preset' => $preset->name]);
+    }
+
+    /**
+     * The presets each link already had, by link UID, as Craft has stored this field's value for
+     * this occurrence. A link occurrence belongs to one element in one site, so only these count:
+     * the element in its own site; its canonical element in that site, when it is a draft or
+     * revision; the element it is being duplicated from, in that element's site (which is how
+     * Craft makes drafts and revisions, applies drafts and reverts to revisions); and the site
+     * version it is being propagated from. Never another site's value, another element's, or what
+     * a request sends: a link keeps a disabled preset it had, but no link can be given one. Read
+     * only when a link has a disabled preset.
+     *
+     * @return array<string, list<string>>
+     */
+    public function keptPresets(LinkCollection $value, ?ElementInterface $element): array
+    {
+        $layoutElementUid = $this->layoutElement?->uid;
+
+        if ($element === null || $layoutElementUid === null || !$this->hasDisabledPreset($value)) {
+            return [];
+        }
+
+        $sources = [[$element->id, $element->siteId], [$element->getCanonicalId(), $element->siteId]];
+
+        if ($element instanceof Element) {
+            $sources[] = [$element->duplicateOf?->id, $element->duplicateOf?->siteId];
+
+            if ($element->propagating) {
+                $sources[] = [$element->propagatingFrom?->id, $element->propagatingFrom?->siteId];
+            }
+        }
+
+        // An element not saved yet, or a source that is not one, has nothing stored.
+        $where = ['or'];
+
+        foreach ($sources as [$elementId, $siteId]) {
+            if ($elementId !== null && $siteId !== null) {
+                $where[] = ['elementId' => (int)$elementId, 'siteId' => (int)$siteId];
+            }
+        }
+
+        if (count($where) === 1) {
+            return [];
+        }
+
+        $kept = [];
+
+        foreach ((new Query())->select(['content'])->from(Table::ELEMENTS_SITES)->where($where)->column() as $content) {
+            $stored = is_string($content) ? Json::decodeIfJson($content) : $content;
+
+            if (is_array($stored) && array_key_exists($layoutElementUid, $stored)) {
+                foreach (self::presetsOf($stored[$layoutElementUid]) as $uid => $presetUid) {
+                    $kept[$uid][] = $presetUid;
+                }
+            }
+        }
+
+        return $kept;
+    }
+
+    /**
+     * The preset each of this field's stored default links has, by link UID: default links the
+     * field already had keep a preset that is disabled since.
+     *
+     * @return array<string, list<string>>
+     */
+    private function storedDefaultPresets(): array
+    {
+        $stored = $this->uid !== null ? Craft::$app->getFields()->getFieldByUid($this->uid) : null;
+
+        return $stored instanceof self ? array_map(static fn(string $presetUid): array => [$presetUid], self::presetsOf($stored->defaultLinks)) : [];
+    }
+
+    /**
+     * The preset of each link in a stored value, by link UID. Content that cannot be read holds
+     * no links, so no presets.
+     *
+     * @return array<string, string>
+     */
+    private static function presetsOf(mixed $stored): array
+    {
+        try {
+            $value = SmartLinks::getInstance()->getLinks()->getSerializer()->deserialize($stored);
+        } catch (LinkValidationException) {
+            return [];
+        }
+
+        $presets = [];
+
+        foreach ($value->links as $link) {
+            if ($link->presetUid !== null) {
+                $presets[$link->uid] = $link->presetUid;
+            }
+        }
+
+        return $presets;
+    }
+
+    /**
+     * Whether any link has a preset that exists and is disabled.
+     */
+    private function hasDisabledPreset(LinkCollection $value): bool
+    {
+        $presets = null;
+
+        foreach ($value->links as $link) {
+            if ($link->presetUid !== null) {
+                $presets ??= $this->plugin()->getPresets()->getAllPresets();
+
+                if (isset($presets[$link->presetUid]) && !$presets[$link->presetUid]->enabled) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -651,7 +827,11 @@ JS, [$view->namespaceInputId('multiple'), $view->namespaceInputId('smartlinks-li
                 'value' => $handle,
             ], $handles),
             'presetOptions' => array_map(static fn(string $uid): array => [
-                'label' => isset($presets[$uid]) ? $presets[$uid]->name : Craft::t('smart-links', 'A preset that no longer exists ({uid})', ['uid' => $uid]),
+                'label' => match (true) {
+                    !isset($presets[$uid]) => Craft::t('smart-links', 'A preset that no longer exists ({uid})', ['uid' => $uid]),
+                    !$presets[$uid]->enabled => Craft::t('smart-links', '{preset} (disabled)', ['preset' => $presets[$uid]->name]),
+                    default => $presets[$uid]->name,
+                },
                 'value' => $uid,
             ], $presetUids),
             'defaultLinksHtml' => $editor->html($defaults),
@@ -663,7 +843,7 @@ JS, [$view->namespaceInputId('multiple'), $view->namespaceInputId('smartlinks-li
         $value = $this->normalizeValue($value, $element);
 
         /** @var LinkCollection|InvalidLinkValue $value */
-        $problems = $value instanceof LinkCollection ? $this->linkProblems($value) : [];
+        $problems = $value instanceof LinkCollection ? $this->linkProblems($value, $this->keptPresets($value, $element)) : [];
         $editor = LinkEditor::forField($this, $element);
 
         return $editor->html($value, $problems);

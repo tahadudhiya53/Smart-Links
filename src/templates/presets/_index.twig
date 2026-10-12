@@ -1,0 +1,71 @@
+{% extends "_layouts/cp" %}
+
+{% set title = "Link presets"|t('smart-links') %}
+{% set selectedSubnavItem = 'presets' %}
+
+{% do view.registerAssetBundle('craft\\web\\assets\\admintable\\AdminTableAsset') -%}
+
+{% do view.registerTranslations('smart-links', [
+    'Name',
+    'Link types',
+    'Defaults',
+    'Problems',
+    'Every link type',
+    'No link presets exist yet.',
+    'Delete the “{name}” preset? Links made with it keep it, and are reported as made with a preset that no longer exists until they are given another one or none.',
+    'Presets reordered.',
+]) %}
+
+{% if readOnly %}
+    {% set contentNotice = readOnlyNotice() %}
+{% endif %}
+
+{% block actionButton %}
+    {% if not readOnly %}
+        <a href="{{ url('smart-links/presets/new') }}" class="btn submit add icon">{{ "New preset"|t('smart-links') }}</a>
+    {% endif %}
+{% endblock %}
+
+{% block content %}
+    <p class="light">{{ "A preset is a kind of link authors can choose: it fills in the settings it provides when chosen, and can lock some of them. Changing a preset never changes links already made with it."|t('smart-links') }}</p>
+    <div id="smartlinks-presets-table"></div>
+{% endblock %}
+
+{% set tableData = [] %}
+{% for preset in presets %}
+    {# What it sets, and what it locks, which may be to nothing. #}
+    {% set settings = preset.defaultFeatures()|map(f => f.value)|merge(preset.locked)|unique %}
+    {% set defaults = settings|map(s => s in preset.locked
+        ? "{setting} (locked)"|t('smart-links', {setting: settingNames[s]})
+        : settingNames[s]) %}
+    {% set tableData = tableData|merge([{
+        id: preset.uid,
+        title: preset.name,
+        url: url("smart-links/presets/#{preset.uid}"),
+        status: preset.enabled,
+        name: preset.name|e,
+        types: (preset.types is empty ? "Every link type"|t('smart-links') : preset.types|map(h => typeNames[h] ?? h)|join(', '))|e,
+        defaults: defaults|join(', ')|e,
+        problems: (problems[preset.uid] ?? [])|join(' ')|e,
+    }]) %}
+{% endfor %}
+
+{% js %}
+new Craft.VueAdminTable({
+    container: '#smartlinks-presets-table',
+    columns: [
+        {name: '__slot:title', title: Craft.t('smart-links', 'Name')},
+        {name: 'types', title: Craft.t('smart-links', 'Link types')},
+        {name: 'defaults', title: Craft.t('smart-links', 'Defaults')},
+        {name: 'problems', title: Craft.t('smart-links', 'Problems')},
+    ],
+    emptyMessage: Craft.t('smart-links', 'No link presets exist yet.'),
+    tableData: {{ tableData|json_encode|raw }},
+    {% if not readOnly %}
+        deleteAction: 'smart-links/presets/delete',
+        deleteConfirmationMessage: Craft.t('smart-links', 'Delete the “{name}” preset? Links made with it keep it, and are reported as made with a preset that no longer exists until they are given another one or none.'),
+        reorderAction: {{ (presets|length > 1 ? 'smart-links/presets/reorder' : '')|json_encode|raw }},
+        reorderSuccessMessage: Craft.t('smart-links', 'Presets reordered.'),
+    {% endif %}
+});
+{% endjs %}

@@ -296,15 +296,535 @@ async function autosaved(page, content) {
   throw new Error('No provisional draft was saved.');
 }
 
+// Submits the page's full-page form, as its Save button does, and waits for the next page.
+async function submitForm(page) {
+  const loaded = page.loaded();
+  await page.eval(`document.querySelector('#main-form').requestSubmit();`);
+  await loaded;
+  await page.settle();
+}
+
+// What project config has stored for one preset, by setting.
+function storedPreset(uid) {
+  const prefix = `smartLinks.presets.${uid}.`;
+  const stored = {};
+
+  for (const [path, value] of Object.entries(fixture('presets'))) {
+    if (path.startsWith(prefix)) {
+      stored[path.slice(prefix.length)] = JSON.parse(value);
+    }
+  }
+
+  return stored;
+}
+
+function presetUidNamed(name) {
+  const path = Object.entries(fixture('presets')).find(([path, value]) => path.endsWith('.name') && JSON.parse(value) === name)?.[0];
+
+  return path ? path.split('.')[2] : null;
+}
+
+function presetOrder() {
+  return Object.entries(fixture('presets')).filter(([path]) => path.endsWith('.sortOrder')).sort((a, b) => Number(a[1]) - Number(b[1])).map(([path]) => path.split('.')[2]);
+}
+
+// Teardown commands say what they found even when they find something wrong.
+function fixtureResult(...args) {
+  const run = spawnSync('ddev', ['exec', '-d', '/var/www/html/plugins/Smart-Links', 'php', 'tests/cp/fixture.php', ...args], {encoding: 'utf8'});
+
+  try {
+    return JSON.parse(run.stdout.trim().split('\n').pop());
+  } catch {
+    return {failed: `${run.stderr}${run.stdout}`};
+  }
+}
+
+// Managing presets through the real control panel, as an admin: create, edit, disable and enable,
+// refuse, reorder, and delete, each checked against what project config stored.
+async function managePresets(admin, content) {
+  const name = 'Smart Links CP UI preset';
+  const form = 'document.querySelector("#main-form")';
+  const originalOrder = presetOrder();
+
+  await admin.goto(`${content.cpUrl}/smart-links/presets/new`);
+  await admin.eval(`{
+    const f = ${form};
+    f.querySelector('[name="name"]').value = ${js(name)};
+    f.querySelector('[name="types[]"][value="url"]').checked = true;
+    f.querySelector('[name="attributes[target]"]').value = '_blank';
+    f.querySelector('[name="attributes[class]"]').value = 'ui-cta';
+    f.querySelector('[name="locked[]"][value="target"]').checked = true;
+  }`);
+  await submitForm(admin);
+  const uid = presetUidNamed(name);
+  check('a preset created in the control panel is stored in project config as entered', uid !== null && js(storedPreset(uid)) === js({'attributes.class.0': 'ui-cta', 'attributes.target': '_blank', enabled: true, 'locked.0': 'target', name, sortOrder: originalOrder.length + 1, 'types.0': 'url'}), js(uid && storedPreset(uid)));
+  check('saving returns to the list, which shows the new preset and says it was saved', new URL(await admin.eval('return location.href;')).pathname.endsWith('/smart-links/presets') && await admin.eval(`return [...document.querySelectorAll('#smartlinks-presets-table tbody tr')].some((row) => row.innerText.includes(${js(name)}));`) && await admin.eval(`return document.body.innerText.includes('Preset saved.');`));
+
+  if (uid === null) {
+    return;
+  }
+
+  await admin.goto(`${content.cpUrl}/smart-links/presets/${uid}`);
+  await admin.eval(`${form}.querySelector('[name="attributes[class]"]').value = 'ui-cta ui-big';`);
+  await submitForm(admin);
+  await admin.goto(`${content.cpUrl}/smart-links/presets/${uid}`);
+  check('an edit is stored, and shown after reloading', storedPreset(uid)['attributes.class.1'] === 'ui-big' && await admin.eval(`return ${form}.querySelector('[name="attributes[class]"]').value === 'ui-cta ui-big';`));
+
+  for (const enabled of [false, true]) {
+    await admin.goto(`${content.cpUrl}/smart-links/presets/${uid}`);
+    await admin.eval(`$('#enabled').data('lightswitch').${enabled ? 'turnOn' : 'turnOff'}();`);
+    await submitForm(admin);
+    await admin.goto(`${content.cpUrl}/smart-links/presets/${uid}`);
+    check(`${enabled ? 'enabling' : 'disabling'} a preset is stored, and shown after reloading`, storedPreset(uid).enabled === enabled && await admin.eval(`return ${form}.querySelector('input[name="enabled"]').value === ${js(enabled ? '1' : '')};`), js(storedPreset(uid)));
+  }
+
+  // A refused save stores nothing and says why, on the form.
+  await admin.goto(`${content.cpUrl}/smart-links/presets/new`);
+  await admin.eval(`${form}.querySelector('[name="name"]').value = ${js(content.existingName.toUpperCase())}; ${form}.querySelector('[name="attributes[rel]"]').value = 'no/follow';`);
+  await submitForm(admin);
+  check('a duplicate name and an invalid rel are refused on the form, and nothing is stored', await admin.eval(`return document.body.innerText.includes('Another preset is already called') && document.body.innerText.includes('is not a valid rel value');`) && presetOrder().length === originalOrder.length + 1);
+
+  // The list's own reorder request, with the user's session and CSRF token.
+  const reversed = [...presetOrder()].reverse();
+  await admin.goto(`${content.cpUrl}/smart-links/presets`);
+  await admin.eval(`await Craft.sendActionRequest('POST', 'smart-links/presets/reorder', {data: {ids: ${js(JSON.stringify(reversed))}}});`);
+  await admin.goto(`${content.cpUrl}/smart-links/presets`);
+  const shownOrder = await admin.eval(`return [...document.querySelectorAll('#smartlinks-presets-table tbody tr')].map((row) => row.innerText.trim().split('\\n')[0].trim());`);
+  check('a new order is stored, and shown after reloading', js(presetOrder()) === js(reversed) && shownOrder[0].includes(name), js(shownOrder));
+  await admin.eval(`await Craft.sendActionRequest('POST', 'smart-links/presets/reorder', {data: {ids: ${js(JSON.stringify([...originalOrder, uid]))}}});`);
+
+  // Deleting asks first: declined, nothing goes; accepted, the preset goes.
+  await admin.goto(`${content.cpUrl}/smart-links/presets`);
+  const row = `[...document.querySelectorAll('#smartlinks-presets-table tbody tr')].find((row) => row.innerText.includes(${js(name)}))`;
+  await admin.eval(`window.confirmed = []; window.confirm = (message) => { window.confirmed.push(message); return false; }; (${row}).querySelector('.delete').click();`);
+  await sleep(1000);
+  check('deleting asks for confirmation, and declining keeps the preset', await admin.eval('return window.confirmed.length === 1 && window.confirmed[0].includes("Links made with it keep it");') && presetUidNamed(name) === uid);
+  await admin.eval(`window.confirm = () => true; (${row}).querySelector('.delete').click();`);
+  await admin.waitFor(`!(${row})`);
+  await admin.goto(`${content.cpUrl}/smart-links/presets`);
+  check('a deleted preset is gone from project config and the list, and the order is as it was', presetUidNamed(name) === null && !(await admin.eval(`return !!(${row});`)) && js(presetOrder()) === js(originalOrder), js(presetOrder()));
+}
+
+// Presets for a user with control panel access to Smart Links but not the preset permission, then
+// with it: refused at every page and action, then able to manage presets.
+// Presets for a user with control panel access to Smart Links but not the preset permission, then
+// with it: refused at every page and action, then able to manage presets.
+async function presetPermissions(author, content) {
+  const before = js(fixture('presets'));
+  const status = (method, path, data) => author.eval(`
+    const body = new URLSearchParams(${js(data ?? {})});
+    body.append(Craft.csrfTokenName, Craft.csrfTokenValue);
+    const response = await fetch(${js(path)}, {method: ${js(method)}, headers: {Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest'}, body: ${js(method)} === 'GET' ? undefined : body, redirect: 'manual'});
+    return response.status;`);
+  const everything = async () => ({
+    list: await status('GET', `${content.cpUrl}/smart-links/presets`),
+    form: await status('GET', `${content.cpUrl}/smart-links/presets/new`),
+    edit: await status('GET', `${content.cpUrl}/smart-links/presets/${content.presets[0]}`),
+    create: await status('POST', `${content.cpUrl}/actions/smart-links/presets/save`, {presetUid: '', name: 'By the author', enabled: '1', types: '', urlSuffix: '', attributes: '', locked: ''}),
+    save: await status('POST', `${content.cpUrl}/actions/smart-links/presets/save`, {presetUid: content.presets[0], name: 'Renamed by the author', enabled: '', types: '', urlSuffix: '', attributes: '', locked: ''}),
+    delete: await status('POST', `${content.cpUrl}/actions/smart-links/presets/delete`, {id: content.presets[0]}),
+    reorder: await status('POST', `${content.cpUrl}/actions/smart-links/presets/reorder`, {ids: JSON.stringify([...presetOrder()].reverse())}),
+  });
+  const navOffers = (path) => author.eval(`return [...document.querySelectorAll('#global-sidebar a')].some((a) => a.href && new URL(a.href).pathname.endsWith(${js(path)}));`);
+
+  // Control panel access only, then with access to the Smart Links section: every presets page
+  // and action is refused either way, by Craft's section gate or by the presets controller.
+  for (const stage of ['control panel access only', 'access to the Smart Links section']) {
+    if (stage !== 'control panel access only') {
+      fixture('grant', String(content.authorId), 'section');
+    }
+
+    await author.goto(content.cpUrl);
+    const refused = await everything();
+    check(`with ${stage}, every presets page and action is refused, and nothing changes`, Object.values(refused).every((code) => code === 403) && js(fixture('presets')) === before, js(refused));
+    check(`with ${stage}, the nav offers no presets page${stage === 'control panel access only' ? ' and no Smart Links section' : ''}`, !(await navOffers('/smart-links/presets')) && (stage !== 'control panel access only' || !(await navOffers('/smart-links'))));
+  }
+
+  fixture('grant', String(content.authorId), 'presets');
+  await author.goto(`${content.cpUrl}/smart-links/presets`);
+  check('with the permission, a user who is not an admin gets the presets page', await author.eval(`return !!document.querySelector('#smartlinks-presets-table');`) && await navOffers('/smart-links/presets'));
+  await author.goto(`${content.cpUrl}/smart-links/presets/new`);
+  await author.eval(`document.querySelector('#main-form [name="name"]').value = 'By the author';`);
+  await submitForm(author);
+  const uid = presetUidNamed('By the author');
+  check('with the permission, they can create a preset', uid !== null);
+
+  if (uid !== null) {
+    check('and delete it', await status('POST', `${content.cpUrl}/actions/smart-links/presets/delete`, {id: uid}) === 200 && presetUidNamed('By the author') === null);
+  }
+}
+
+// The presets phase, before any other content exists (see fixture.php): the presets pages and
+// actions, as an admin and as a user with and without the preset permission, then everything put
+// back as it was.
+async function presetsPhase(browser) {
+  console.log('Managing presets in the control panel…');
+  const content = fixture('presets-setup');
+  const names = Object.entries(fixture('presets')).filter(([path]) => path.endsWith('.name')).map(([, value]) => JSON.parse(value));
+  content.existingName = names[0];
+
+  try {
+    check('the project has a preset to compare names with', names.length > 0);
+    const admin = await browser.newPage();
+    await admin.goto(fixture('impersonate', String(content.adminId)).url);
+    await managePresets(admin, content);
+    check('no script errors on the presets pages', admin.errors.length === 0, admin.errors.join('\n'));
+
+    if (content.authorId) {
+      const author = await browser.newPage();
+      await author.goto(fixture('impersonate', String(content.authorId)).url);
+      await presetPermissions(author, content);
+    } else {
+      check('a user without the preset permission could be created', false, 'The host refused to save a test user.');
+    }
+  } catch (error) {
+    console.error(`\nThe presets phase stopped: ${error.stack || error}`);
+    throw error;
+  } finally {
+    const teardown = fixtureResult('presets-teardown');
+    check('managing presets leaves the project as it was (its files differed only in the time of the last change, which is put back)', teardown.restored === true && teardown.userRemoved === true, js(teardown));
+    check('Craft sees no project config changes pending after managing presets', fixture('pending').pending === false);
+  }
+}
+
+// Link presets: the pages that manage them, as the real control panel renders them, and a preset
+// chosen in a real entry.
+async function presets(admin, content) {
+  await admin.goto(`${content.cpUrl}/smart-links/presets`);
+  const row = `[...document.querySelectorAll('#smartlinks-presets-table tbody tr')].find((row) => row.innerText.includes(${js(content.preset.name)}))`;
+
+  try {
+    await admin.waitFor(row);
+  } catch {
+    // Reported by the checks below.
+  }
+
+  check('the presets page lists the presets, in Craft’s admin table', await admin.eval(`return !!(${row});`));
+  check('a preset’s row says what it is for and what it sets and locks', await admin.eval(`const text = (${row})?.innerText ?? ''; return text.includes('URL') && text.includes('Target (locked)') && text.includes('CSS classes');`), await admin.eval(`return (${row})?.innerText ?? '';`));
+  check('presets can be deleted from the list, after confirming', await admin.eval(`return !!(${row})?.querySelector('.delete, [data-icon="remove"], button[title]');`));
+  check('the section’s nav offers the presets page', await admin.eval(`return [...document.querySelectorAll('#global-sidebar a')].some((a) => a.href && new URL(a.href).pathname.endsWith('/smart-links/presets'));`), await admin.eval(`return [...document.querySelectorAll('#global-sidebar a')].map((a) => a.getAttribute('href')).filter((href) => href?.includes('smart-links')).join(' ');`));
+
+  await admin.goto(`${content.cpUrl}/smart-links/presets/${content.preset.uid}`);
+  const form = 'document.querySelector("#main-form")';
+  const shown = await admin.eval(`const f = ${form}; return f && {
+    name: f.querySelector('[name="name"]').value,
+    types: [...f.querySelectorAll('[name="types[]"]:checked')].map((i) => i.value),
+    target: f.querySelector('[name="attributes[target]"]').value,
+    cls: f.querySelector('[name="attributes[class]"]').value,
+    locked: [...f.querySelectorAll('[name="locked[]"]:checked')].map((i) => i.value),
+  };`);
+  check('the edit page shows the preset as defined', js(shown) === js({name: content.preset.name, types: ['url'], target: '_blank', cls: 'cp-cta', locked: ['target']}), js(shown));
+  // Exactly what the controller reads, and nothing it does not.
+  const posted = await admin.eval(`return [...new Set([...new FormData(${form}).keys()].map((key) => key.split('[')[0]))].sort();`);
+  const expected = ['CRAFTCMS_CSRF_TOKEN', 'action', 'attributes', 'enabled', 'locked', 'name', 'presetUid', 'redirect', 'types', 'urlSuffix'];
+  check('the edit form posts exactly the settings the controller reads', js(posted.filter((key) => !/csrf/i.test(key))) === js(expected.filter((key) => !/csrf/i.test(key))) && posted.some((key) => /csrf/i.test(key)), js(posted));
+  check('the edit form saves through the presets controller', await admin.eval(`return ${form}.querySelector('[name="action"]').value === 'smart-links/presets/save' && ${form}.querySelector('[name="presetUid"]').value === ${js(content.preset.uid)};`));
+
+  await admin.goto(`${content.cpUrl}/smart-links/presets/new`);
+  check('the new preset page starts empty and enabled', await admin.eval(`const f = ${form}; return f.querySelector('[name="name"]').value === '' && f.querySelector('[name="presetUid"]').value === '' && f.querySelector('input[name="enabled"]').value === '1';`));
+
+  // An author choosing the preset in an entry: the editor fills in what it sets and holds what
+  // it locks, and the link is saved with them.
+  await admin.goto(content.presetPage.editUrl);
+  const key = await addLink(admin, 'url');
+  await admin.eval(setValue(data(key, 'url'), 'input[name$="[data][url][url]"]', 'https://example.com/campaign'));
+  await admin.eval(`{ const select = ${linkByKey(key)}.querySelector('[data-smartlinks-preset]'); select.value = ${js(content.preset.uid)}; select.dispatchEvent(new Event('change', {bubbles: true})); }`);
+  check('choosing the preset fills in its settings and locks its target', await admin.eval(`const link = ${linkByKey(key)}; return link.querySelector('select[name$="[attributes][target]"]').value === '_blank' && link.querySelector('select[name$="[attributes][target]"]').disabled && link.querySelector('input[name$="[attributes][class]"]').value === 'cp-cta' && link.querySelector('[data-smartlinks-lock-note]')?.textContent === 'Set by the “${content.preset.name}” preset.';`), await admin.eval(`const link = ${linkByKey(key)}; return JSON.stringify({target: link.querySelector('select[name$="[attributes][target]"]').value, disabled: link.querySelector('select[name$="[attributes][target]"]').disabled, cls: link.querySelector('input[name$="[attributes][class]"]').value, note: link.querySelector('[data-smartlinks-lock-note]')?.textContent});`));
+  await save(admin);
+  const stored = fixture('inspect', String(content.presetPage.id), content.primarySite.handle).canonical.smartLinksCpLinks?.links?.[0];
+  check('the link is saved with the preset and what it set', stored?.presetUid === content.preset.uid && js(stored?.attributes) === js({target: '_blank', class: ['cp-cta']}), js(stored));
+
+  // Disabled since: the link keeps it, a new link is not offered it, and a forged one is refused
+  // by the server when the entry is saved.
+  fixture('set-preset-enabled', content.preset.uid, '0');
+
+  try {
+    await admin.goto(content.presetPage.editUrl);
+    const keptKey = await admin.eval(`return ${links()}[0].getAttribute('data-key');`);
+    check('a link keeps a preset disabled since, named as disabled', await admin.eval(`const select = ${linkByKey(keptKey)}.querySelector('[data-smartlinks-preset]'); return select.value === ${js(content.preset.uid)} && select.selectedOptions[0].textContent.includes('(disabled)');`));
+    const newKey = await addLink(admin, 'url');
+    check('a disabled preset is not offered for a new link', !(await admin.eval(`return [...${linkByKey(newKey)}.querySelectorAll('[data-smartlinks-preset] option')].some((option) => option.value === ${js(content.preset.uid)});`)));
+    await admin.eval(setValue(data(newKey, 'url'), 'input[name$="[data][url][url]"]', 'https://example.com/forged'));
+    // An input the page never offered, named as the link's own preset input would be.
+    await admin.eval(`{
+      const link = ${linkByKey(newKey)};
+      link.querySelector('[data-smartlinks-preset]')?.remove();
+      const forged = document.createElement('input');
+      forged.type = 'hidden';
+      forged.name = link.querySelector('input[name$="[uid]"]').name.replace(/\\[uid\\]$/, '[presetUid]');
+      forged.value = ${js(content.preset.uid)};
+      link.append(forged);
+    }`);
+    await save(admin);
+    const live = fixture('inspect', String(content.presetPage.id), content.primarySite.handle).canonical.smartLinksCpLinks?.links ?? [];
+    check('a disabled preset forged onto a new link is refused when the entry is saved, and the live entry is unchanged', await admin.eval(`return document.body.innerText.includes('preset is disabled, so no link can be given it');`) && live.length === 1 && live[0].presetUid === content.preset.uid, js(live));
+  } finally {
+    fixture('set-preset-enabled', content.preset.uid, '1');
+  }
+}
+
+// The link inventory, as the real control panel serves it: who may see it and rebuild the index,
+// its table, search, filters, sorting and pages, malformed requests, encoding, and a rebuild run
+// through Craft's own queue.
+async function linksPhase(browser, content) {
+  const indexed = fixture('index');
+  check('the run’s content is indexed without problems', indexed.problems.length === 0 && indexed.stale === false, JSON.stringify(indexed));
+
+  const linksUrl = `${content.cpUrl}/smart-links/links`;
+  const rows = 'document.querySelectorAll("#smartlinks-inventory tbody tr")';
+  const urls = `[...${rows}].map((row) => row.querySelector('th a.go, th code')?.textContent.trim())`;
+  const status = (page, method, path) => page.eval(`
+    const body = new URLSearchParams();
+    body.append(Craft.csrfTokenName, Craft.csrfTokenValue);
+    const response = await fetch(${js(path)}, {method: ${js(method)}, headers: {Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest'}, body: ${js(method)} === 'GET' ? undefined : body, redirect: 'manual'});
+    return response.status;`);
+  const navOffers = (page) => page.eval(`return [...document.querySelectorAll('#global-sidebar a')].some((a) => a.href && new URL(a.href).pathname.endsWith('/smart-links/links'));`);
+  const pages = [];
+
+  // A user of the section without the inventory permission: no page, no nav item.
+  const outsider = await browser.newPage();
+  pages.push(outsider);
+  await outsider.goto(fixture('impersonate', String(content.inventory.outsider)).url);
+  await outsider.goto(`${content.cpUrl}/smart-links`);
+  check('without the inventory permission, the nav offers no Links page', !(await navOffers(outsider)));
+  check('without the inventory permission, the Links page and the rebuild are refused', await status(outsider, 'GET', linksUrl) === 403 && await status(outsider, 'POST', `${content.cpUrl}/actions/smart-links/links/rebuild`) === 403);
+
+  // A viewer: the page, its table, and everything but rebuilding.
+  const viewer = await browser.newPage();
+  pages.push(viewer);
+  await viewer.goto(fixture('impersonate', String(content.inventory.viewer)).url);
+  await viewer.goto(linksUrl);
+  check('with the inventory permission, the nav offers the Links page', await navOffers(viewer));
+  check('the Links page renders the inventory table, a page of 50', await viewer.eval(`return ${rows}.length === 50 && !!document.querySelector('#smartlinks-inventory-pages .next-page');`));
+  check('a viewer is not offered a rebuild', !(await viewer.eval(`return !!document.querySelector('#smartlinks-index-actions form');`)));
+  const queuedBefore = fixture('index-status').queuedRebuilds;
+  check('a viewer posting a rebuild directly is refused, and nothing is queued', await status(viewer, 'POST', `${content.cpUrl}/actions/smart-links/links/rebuild`) === 403 && fixture('index-status').queuedRebuilds === queuedBefore);
+  check('a rebuild cannot be asked for with GET', await status(viewer, 'GET', `${content.cpUrl}/actions/smart-links/links/rebuild`) >= 400 && fixture('index-status').queuedRebuilds === queuedBefore);
+
+  // Search, through the page's own form.
+  await viewer.eval(`document.querySelector('#smartlinks-inventory-filters [name="search"]').value = 'inventory.example.test/page-0';`);
+  let loaded = viewer.loaded();
+  await viewer.eval(`document.querySelector('#smartlinks-inventory-filters').requestSubmit();`);
+  await loaded;
+  await viewer.settle();
+  const searched = await viewer.eval(`return ${urls};`);
+  check('search finds the links it names', searched.length === 9 && searched.every((url) => url.startsWith('https://inventory.example.test/page-0')) && new URL(await viewer.eval('return location.href;')).searchParams.get('search') === 'inventory.example.test/page-0', JSON.stringify(searched));
+
+  // Each filter, through the form's own controls.
+  const filtered = async (params) => {
+    await viewer.goto(linksUrl);
+    await viewer.eval(`
+      const form = document.querySelector('#smartlinks-inventory-filters');
+      for (const [name, value] of Object.entries(${js(params)})) {
+        form.querySelector('[name="' + name + '"]').value = value;
+      }`);
+    const loaded = viewer.loaded();
+    await viewer.eval(`document.querySelector('#smartlinks-inventory-filters').requestSubmit();`);
+    await loaded;
+    await viewer.settle();
+
+    return viewer.eval(`return ${urls};`);
+  };
+  const inSecondSite = (await filtered({search: 'inventory.example.test', sourceSite: content.inventory.secondSite})).sort();
+  check('the site filter counts the site the links are in', js(inSecondSite) === js(['https://inventory.example.test/one-field', 'https://inventory.example.test/second-only']), js(inSecondSite));
+  check('the link type filter shows that type only', js(await filtered({search: 'inventory', type: 'email'})) === js(['mailto:inventory@example.test']));
+  check('the source filter shows that field’s links only', js(await filtered({search: 'inventory.example.test', source: 'smartLinksCpOne'})) === js(['https://inventory.example.test/one-field']));
+  check('the health filter shows what was observed', js(await filtered({search: 'inventory', health: 'broken'})) === js(['https://inventory.example.test/page-01']));
+  check('a target that can’t be checked is filtered as such', js(await filtered({search: 'inventory', health: 'none'})) === js(['mailto:inventory@example.test']));
+  const missing = await filtered({target: 'missing'});
+  check('the target filter shows targets that don’t exist', missing.length > 0 && await viewer.eval(`return [...${rows}].every((row) => row.querySelector('[data-target]').dataset.target === 'missing');`), JSON.stringify(missing));
+
+  // Sorting by a header link, both ways, and pages.
+  await viewer.goto(`${linksUrl}?search=inventory.example.test%2Fpage-`);
+  loaded = viewer.loaded();
+  await viewer.eval(`[...document.querySelectorAll('#smartlinks-inventory thead a')].find((a) => new URL(a.href).searchParams.get('sort') === 'link').click();`);
+  await loaded;
+  await viewer.settle();
+  const ascending = await viewer.eval(`return ${urls};`);
+  check('sorting by link puts them in order', ascending.length === 50 && ascending[0] === 'https://inventory.example.test/page-01' && await viewer.eval(`return document.querySelector('#smartlinks-inventory thead [aria-sort="ascending"]') !== null;`), JSON.stringify(ascending.slice(0, 3)));
+  await viewer.clickAndLoad('#smartlinks-inventory-pages .next-page');
+  check('the next page holds the rest, and leads back', js(await viewer.eval(`return ${urls};`)) === js(['https://inventory.example.test/page-51']) && await viewer.eval(`return !!document.querySelector('#smartlinks-inventory-pages .prev-page') && document.querySelector('#smartlinks-inventory-pages .page-info').textContent.includes('51');`));
+  loaded = viewer.loaded();
+  await viewer.eval(`[...document.querySelectorAll('#smartlinks-inventory thead a')].find((a) => new URL(a.href).searchParams.get('sort') === 'link').click();`);
+  await loaded;
+  await viewer.settle();
+  check('sorting again reverses it, from the first page', (await viewer.eval(`return ${urls};`))[0] === 'https://inventory.example.test/page-51');
+
+  // A label written as markup is text.
+  await viewer.goto(`${linksUrl}?search=marked-up`);
+  check('a label written as markup is shown as text', await viewer.eval(`const cell = document.querySelector('#smartlinks-inventory tbody tr td:nth-of-type(2)'); return cell.textContent.includes('<b>Bold</b> & "quoted"') && !document.querySelector('#smartlinks-inventory tbody b');`));
+
+  // Malformed requests are refused, never shown as everything.
+  const malformed = {};
+
+  for (const query of ['sort=nonsense', 'sourceSite=noSuchSite', 'page=0', 'health=great', 'type=Not%20A%20Type', 'source=title']) {
+    malformed[query] = await status(viewer, 'GET', `${linksUrl}?${query}`);
+  }
+
+  check('malformed filters, sorts and pages are refused', Object.values(malformed).every((code) => code === 400), js(malformed));
+  await viewer.goto(`${linksUrl}?site=noSuchSite&search=inventory.example.test%2Fpage-`);
+  check('Craft’s own site parameter is not a filter', await viewer.eval(`return ${rows}.length === 50;`));
+
+  // Where a target is used: a permission of its own, nested under the inventory's.
+  const usageLinks = 'document.querySelectorAll("#smartlinks-inventory tbody a[href*=\\"/smart-links/links/\\"]")';
+  await viewer.goto(`${linksUrl}?search=inventory.example.test%2Fone-field`);
+  const targetId = await viewer.eval('return document.querySelector("#smartlinks-inventory tbody tr")?.dataset.id;');
+  check('without the usage permission, the inventory leads nowhere else, and the usage page is refused', targetId && await viewer.eval(`return ${usageLinks}.length === 0;`) && await status(viewer, 'GET', `${linksUrl}/${targetId}`) === 403, String(targetId));
+
+  const usageViewer = await browser.newPage();
+  pages.push(usageViewer);
+  await usageViewer.goto(fixture('impersonate', String(content.inventory.rebuilder)).url);
+  await usageViewer.goto(`${linksUrl}?search=inventory.example.test%2Fone-field`);
+  const counted = await usageViewer.eval(`return Number(${usageLinks}[0]?.textContent.trim());`);
+  await usageViewer.clickAndLoad('#smartlinks-inventory tbody a[href*="/smart-links/links/"]');
+  const usageRows = 'document.querySelectorAll("#smartlinks-usage tbody tr")';
+  check('with it, the usage count leads to the target’s page, listing every occurrence', new URL(await usageViewer.eval('return location.href;')).pathname.endsWith(`/smart-links/links/${targetId}`) && counted > 0 && await usageViewer.eval(`return ${usageRows}.length;`) === counted, js({counted, shown: await usageViewer.eval(`return ${usageRows}.length;`)}));
+  check('each occurrence names its source, element type, field and site', await usageViewer.eval(`return [...${usageRows}].every((row) => row.querySelector('th').textContent.includes('CP inventory') && row.textContent.includes('Entry') && row.textContent.includes('smartLinksCpOne') && row.querySelector('[data-stale]').dataset.stale === 'current');`), await usageViewer.eval(`return ${usageRows}[0]?.innerText ?? '';`));
+  check('the page names the target and leads back to the inventory', await usageViewer.eval(`return document.querySelector('#smartlinks-target').textContent.includes('https://inventory.example.test/one-field') && [...document.querySelectorAll('#crumb-list a')].some((a) => new URL(a.href).pathname.endsWith('/smart-links/links'));`));
+  await usageViewer.eval(`document.querySelector('#smartlinks-usage-filters [name="sourceSite"]').value = ${js(content.inventory.secondSite)};`);
+  loaded = usageViewer.loaded();
+  await usageViewer.eval(`document.querySelector('#smartlinks-usage-filters').requestSubmit();`);
+  await loaded;
+  await usageViewer.settle();
+  check('the site filter shows that site’s occurrences only', await usageViewer.eval(`return ${usageRows}.length === 1 && new URL(location.href).searchParams.get('sourceSite') === ${js(content.inventory.secondSite)};`), await usageViewer.eval(`return ${usageRows}.length;`));
+  const usageRefusals = {malformed: await status(usageViewer, 'GET', `${linksUrl}/${targetId}?page=0`), unknown: await status(usageViewer, 'GET', `${linksUrl}/999999999`)};
+  check('a malformed usage page is refused, and an unknown target is not found', usageRefusals.malformed === 400 && usageRefusals.unknown === 404, js(usageRefusals));
+
+  // Where links are used, through more of the page: pages, filters, nesting, edit pages, and
+  // what the index has not caught up with yet.
+  const usage = fixture('usage-setup');
+  const usagePage = (indexId, query = '') => `${linksUrl}/${indexId}${query}`;
+  const usageInfo = () => usageViewer.eval('return document.querySelector("#smartlinks-usage-pages .page-info")?.textContent.trim() ?? "";');
+  const usageKeys = () => usageViewer.eval(`return [...${usageRows}].map((row) => row.dataset.usage);`);
+  const submitUsageFilters = async (values) => {
+    await usageViewer.eval(`for (const [name, value] of Object.entries(${js(values)})) { document.querySelector('#smartlinks-usage-filters [name="' + name + '"]').value = value; }`);
+    const filtered = usageViewer.loaded();
+    await usageViewer.eval(`document.querySelector('#smartlinks-usage-filters').requestSubmit();`);
+    await filtered;
+    await usageViewer.settle();
+  };
+
+  // One target used 56 times in each site's copy: 50 a page, every one once.
+  await usageViewer.goto(usagePage(usage.many));
+  const seen = [];
+  let pageCount = 0;
+
+  while (true) {
+    seen.push(...await usageViewer.eval(`return [...${usageRows}].map((row) => row.dataset.usage);`));
+    pageCount++;
+
+    if (!(await usageViewer.eval('return !!document.querySelector("#smartlinks-usage-pages .next-page");'))) {
+      break;
+    }
+
+    await usageViewer.clickAndLoad('#smartlinks-usage-pages .next-page');
+  }
+
+  const total = Number((await usageInfo()).match(/of ([\d,]+)/)?.[1].replace(/,/g, ''));
+  check('every occurrence is on exactly one page, 50 a page, through the next-page links', seen.length === total && new Set(seen).size === total && pageCount === Math.ceil(total / 50) && total >= 112, js({seen: seen.length, unique: new Set(seen).size, total, pageCount}));
+  await usageViewer.clickAndLoad('#smartlinks-usage-pages .prev-page');
+  check('the previous-page link leads back', (await usageInfo()).startsWith(`${(pageCount - 2) * 50 + 1}–`), await usageInfo());
+
+  await usageViewer.goto(usagePage(usage.many));
+  await submitUsageFilters({source: 'smartLinksCpOne'});
+  check('the field filter shows that field’s occurrences only', await usageViewer.eval(`return [...${usageRows}].every((row) => row.textContent.includes('smartLinksCpOne'));`) && (await usageKeys()).length > 0 && (await usageKeys()).length < 50, js(await usageKeys()));
+  await usageViewer.goto(usagePage(usage.many));
+  await submitUsageFilters({sourceSite: content.inventory.secondSite, source: 'smartLinksCpLinks'});
+  await usageViewer.clickAndLoad('#smartlinks-usage-pages .next-page');
+  const kept = new URL(await usageViewer.eval('return location.href;')).searchParams;
+  check('changing page keeps both filters', kept.get('sourceSite') === content.inventory.secondSite && kept.get('source') === 'smartLinksCpLinks' && kept.get('page') === '2', kept.toString());
+  check('a page past the last one says so', await status(usageViewer, 'GET', usagePage(usage.many, '?page=99')) === 200 && await (async () => { await usageViewer.goto(usagePage(usage.many, '?page=99')); return usageViewer.eval('return !!document.querySelector("#smartlinks-usage-past-end");'); })());
+
+  // A nested entry: shown in the page it is in, through the Matrix field; named, with no way in,
+  // for someone who may not view the content.
+  await usageViewer.goto(usagePage(usage.nested));
+  check('a nested occurrence shows the page and the field it is nested in', await usageViewer.eval(`const text = ${usageRows}[0]?.querySelector('th').textContent.replace(/\\s+/g, ' ') ?? ''; return text.includes(${js(usage.nestedPage.title)}) && text.includes('smartLinksCpBlocks') && text.includes('Block');`), await usageViewer.eval(`return ${usageRows}[0]?.querySelector('th').textContent.replace(/\\s+/g, ' ') ?? '';`));
+  check('without the right to view the content, no edit page is linked', await usageViewer.eval(`return ${usageRows}[0].querySelectorAll('th a').length === 0;`));
+  const usageAdmin = await browser.newPage();
+  pages.push(usageAdmin);
+  await usageAdmin.goto(fixture('impersonate', String(content.adminId)).url);
+  await usageAdmin.goto(usagePage(usage.nested));
+  const editLinks = await usageAdmin.eval(`return [...document.querySelectorAll('#smartlinks-usage tbody tr:first-child th a')].map((a) => new URL(a.href).pathname);`);
+  check('with it, the page and the nested entry each link to their edit page', editLinks.length === 2 && editLinks[0].endsWith(new URL(usage.nestedPage.editUrl, content.cpUrl).pathname), js(editLinks));
+  await usageAdmin.clickAndLoad('#smartlinks-usage tbody tr:first-child th a');
+  check('following the source’s link opens it in Craft’s editor', new URL(await usageAdmin.eval('return location.href;')).pathname.endsWith(new URL(usage.nestedPage.editUrl, content.cpUrl).pathname) && await usageAdmin.eval('return !!document.querySelector("#main-form");'));
+
+  // A link to an entry deleted since: still found by it, and said to lead nowhere.
+  await usageViewer.goto(usagePage(usage.deletedTarget));
+  check('a link to a deleted entry is listed, and its target said not to exist', await usageViewer.eval(`return document.querySelector('#smartlinks-target [data-target]').dataset.target === 'missing' && ${usageRows}.length > 0;`));
+
+  // A source trashed without the index hearing of it: listed as last indexed, said to be in the
+  // trash; once the index catches up, gone.
+  fixture('usage-stale', String(usage.trashedPage));
+  await usageViewer.goto(usagePage(usage.trashed));
+  check('an occurrence in a source trashed since is said to be in the trash, with no element shown as current', await usageViewer.eval(`return [...${usageRows}].length > 0 && [...${usageRows}].every((row) => row.querySelector('[data-stale]').dataset.stale === 'sourceTrashed' && row.textContent.includes('The element is in the trash'));`));
+  fixture('index');
+  check('once the index has caught up, the trashed source’s target is not found', await status(usageViewer, 'GET', usagePage(usage.trashed)) === 404);
+
+  // A field renamed: shown by its new name at once; deleted: said to be, until a rebuild.
+  fixture('usage-field', 'rename', 'smartLinksCpOne', 'Renamed in the CP run');
+  await usageViewer.goto(usagePage(usage.oneField));
+  check('a renamed field is shown by its new name, with nothing indexed again', await usageViewer.eval(`return ${usageRows}.length > 0 && [...${usageRows}].every((row) => row.textContent.includes('Renamed in the CP run') && row.querySelector('[data-stale]').dataset.stale === 'current');`));
+  fixture('usage-field', 'rename', 'smartLinksCpOne', 'smartLinksCpOne');
+  fixture('usage-field', 'delete', 'smartLinksCpOne');
+  await usageViewer.goto(usagePage(usage.oneField));
+  check('occurrences of a deleted field are said to be so, naming no field in its place', await usageViewer.eval(`return ${usageRows}.length > 0 && [...${usageRows}].every((row) => row.querySelector('[data-stale]').dataset.stale === 'fieldDeleted' && /Field \\d+ \\(deleted\\)/.test(row.textContent) && !row.textContent.includes('smartLinksCpOne'));`), await usageViewer.eval(`return ${usageRows}[0]?.innerText ?? '';`));
+  fixture('index');
+  check('once rebuilt, the deleted field’s occurrences are gone', await status(usageViewer, 'GET', usagePage(usage.oneField)) === 404);
+
+  // A rebuilder: offered a rebuild, which goes through Craft's queue and brings the index up to
+  // date.
+  fixture('make-stale', String(content.inventory.pageId));
+  const rebuilder = await browser.newPage();
+  pages.push(rebuilder);
+  await rebuilder.goto(fixture('impersonate', String(content.inventory.rebuilder)).url);
+  await rebuilder.goto(linksUrl);
+  check('the page says when the index is behind content', await rebuilder.eval(`return !!document.querySelector('#smartlinks-index-status');`));
+  check('a rebuilder is offered a rebuild', await rebuilder.eval(`return !!document.querySelector('#smartlinks-index-actions form button');`));
+  await rebuilder.clickAndLoad('#smartlinks-index-actions form button');
+  let current = false;
+
+  for (let attempt = 0; attempt < 20 && !current; attempt++) {
+    // Craft runs its queue from control panel pages.
+    await rebuilder.goto(linksUrl);
+    await sleep(1500);
+    current = fixture('index-status').stale === false;
+  }
+
+  check('the rebuild was queued and ran in Craft’s queue, and the index is up to date again', current && fixture('index-status').queuedRebuilds === 0);
+  await rebuilder.goto(linksUrl);
+  check('the page no longer says the index is behind', !(await rebuilder.eval(`return !!document.querySelector('#smartlinks-index-status');`)));
+
+  // A guest (no session cookie): sent to sign in, and nothing queued.
+  const guest = await rebuilder.eval(`
+    const page = await fetch(${js(linksUrl)}, {credentials: 'omit'});
+    const rebuild = await fetch(${js(`${content.cpUrl}/actions/smart-links/links/rebuild`)}, {method: 'POST', credentials: 'omit'});
+    return {page: page.url, rebuild: rebuild.status, rebuildUrl: rebuild.url};`);
+  check('a guest is sent to sign in, and cannot rebuild', new URL(guest.page).pathname.endsWith('/login') && (guest.rebuild >= 400 || new URL(guest.rebuildUrl).pathname.endsWith('/login')) && fixture('index-status').queuedRebuilds === 0, js(guest));
+
+  check('no script errors on the inventory pages', pages.every((page) => page.errors.length === 0), pages.flatMap((page) => page.errors).join('\n'));
+}
+
 async function main() {
+  let browser = await Browser.launch();
+
+  try {
+    await presetsPhase(browser);
+  } catch (error) {
+    await browser.close();
+    throw error;
+  }
+
   console.log('Setting up content in the host project…');
   const content = fixture('setup');
-  let browser = null;
 
   try {
     check('the content’s project config was stored, so it can be removed again', content.configStored === true);
-    browser = await Browser.launch();
     await scenario(browser, content);
+  } catch (error) {
+    // Said before the teardown runs, so a teardown failure cannot hide it.
+    console.error(`\nThe scenario stopped: ${error.stack || error}`);
+    throw error;
   } finally {
     try {
       await browser?.close();
@@ -313,8 +833,9 @@ async function main() {
     }
 
     console.log('Removing the content…');
-    const teardown = fixture('teardown');
+    const teardown = fixtureResult('teardown');
     check('the project is left exactly as it was (no leftovers, project config and YAML unchanged)', teardown.leftovers.length === 0 && teardown.configRestored && teardown.yamlUnchanged, JSON.stringify(teardown));
+    check('Craft sees no project config changes pending afterwards', fixture('pending').pending === false);
   }
 }
 
@@ -360,6 +881,8 @@ async function scenario(browser, content) {
 
   await admin.goto(fixture('impersonate', String(content.adminId)).url);
   check('an admin signs in to the control panel', await admin.eval('return location.pathname.startsWith("/admin") && !!document.querySelector("#global-sidebar, #global-container");'));
+
+  await presets(admin, content);
 
   await admin.goto(content.page.editUrl);
   check('the entry editor shows the Smart Links field', await admin.eval(`return !!${field()};`));
@@ -665,11 +1188,17 @@ async function scenario(browser, content) {
     check('a restricted author could be created for the permission checks', false, 'The host refused to save a test user.');
   }
 
+  await linksPhase(browser, content);
+
   // The mutations refused on purpose above are logged by Craft as GraphQL user errors.
   const expectedErrors = ['Only http and https URLs can be linked to.', 'is not one of the entries this link can point at', 'Cannot query field "save_smartLinksCpPrivate_', '_traverseAndNormalizeArguments(): Argument #2 ($mutationArguments) must be of type array, null given'];
+  // So are the inventory's refusals asked for above: a user without a permission, a GET for a
+  // rebuild, malformed filters, and a guest's rebuild without a CSRF token.
+  const expectedRefusals = ['User is not authorized to perform this action.', 'Post request required', 'The inventory can’t be sorted by “nonsense”.', 'There is no site “noSuchSite”.', 'The page must be a positive number.', '“great” is not a health state.', '“Not A Type” is not a link type handle.', 'There is no Smart Links field “title”.', 'Unable to verify your data submission.'];
   const logged = fixture('log-errors', JSON.stringify(logMark));
-  const unexpected = logged.filter((line) => !((line.includes('[GraphQL\\Error\\UserError]') || line.includes('[GraphQL\\Error\\Error]') || line.includes('[TypeError]')) && expectedErrors.some((message) => line.includes(message))));
-  check('Craft logged no errors or warnings while the test ran, besides the GraphQL refusals asked for', unexpected.length === 0, unexpected.join('\n'));
+  const unexpected = logged.filter((line) => !((line.includes('[GraphQL\\Error\\UserError]') || line.includes('[GraphQL\\Error\\Error]') || line.includes('[TypeError]')) && expectedErrors.some((message) => line.includes(message)))
+    && !(/\[yii\\web\\HttpException:40[035]\]/.test(line) && expectedRefusals.some((message) => line.includes(message))));
+  check('Craft logged no errors or warnings while the test ran, besides the refusals asked for', unexpected.length === 0, unexpected.join('\n'));
 }
 
 main()

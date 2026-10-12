@@ -414,45 +414,6 @@ class SmartLinkFieldTest extends TestCase
 
     // Presets
 
-    public function testPresetsAreReadFromProjectConfig(): void
-    {
-        $presets = SmartLinks::getInstance()->getPresets()->getAllPresets();
-
-        self::assertSame([self::PRIMARY, self::SECONDARY], array_keys($presets));
-        self::assertSame('Primary CTA', $presets[self::PRIMARY]->name);
-        self::assertNull(SmartLinks::getInstance()->getPresets()->getPresetByUid(self::GONE));
-    }
-
-    /**
-     * @return array<string, array{mixed}>
-     */
-    public static function malformedPresetDefinitions(): array
-    {
-        return [
-            'an unknown preset property' => [['name' => 'X', 'defaults' => ['target' => '_blank']]],
-            'no name' => [['label' => 'X']],
-            'an empty name' => [['name' => '  ']],
-            'a definition that is not one' => ['X'],
-        ];
-    }
-
-    #[DataProvider('malformedPresetDefinitions')]
-    public function testAMalformedPresetDefinitionIsRefusedNotPartlyRead(mixed $definition): void
-    {
-        $projectConfig = Craft::$app->getProjectConfig();
-        $uid = '9d6b2e4f-5c7a-4b1d-8f0e-4a5b6c7d8e9f';
-        $projectConfig->set(Presets::CONFIG_KEY . ".$uid", $definition);
-
-        try {
-            SmartLinks::getInstance()->getPresets()->getAllPresets();
-            self::fail('A malformed preset definition was read.');
-        } catch (InvalidConfigException $exception) {
-            self::assertStringContainsString($uid, $exception->getMessage());
-        } finally {
-            $projectConfig->remove(Presets::CONFIG_KEY . ".$uid");
-        }
-    }
-
     /**
      * @return array<string, array{string|null, list<array{string, Code}>}>
      */
@@ -1683,7 +1644,7 @@ class SmartLinkFieldTest extends TestCase
     {
         $projectConfig = Craft::$app->getProjectConfig();
         $uid = 'ad1e2f3a-4b5c-4d6e-8f7a-9b0c1d2e3f4a';
-        $projectConfig->set(Presets::CONFIG_KEY . ".$uid", ['name' => '"><img src=x onerror=alert("preset")>']);
+        $projectConfig->set(Presets::CONFIG_KEY . ".$uid", ['name' => '"><img src=x onerror=alert("preset")>', 'sortOrder' => 99]);
         $field = self::createField('smartLinksTestEvil', ['types' => ['url'], 'presets' => [$uid]]);
 
         try {

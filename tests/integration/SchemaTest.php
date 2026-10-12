@@ -15,6 +15,7 @@ use LogicException;
 use PHPUnit\Framework\TestCase;
 use Tahadudhiya\SmartLinks\enums\HealthFailure;
 use Tahadudhiya\SmartLinks\enums\HealthState;
+use Tahadudhiya\SmartLinks\enums\ResolutionStatus;
 use Tahadudhiya\SmartLinks\errors\TargetHashCollisionException;
 use Tahadudhiya\SmartLinks\migrations\Install;
 use Tahadudhiya\SmartLinks\models\CanonicalUrl;
@@ -23,9 +24,12 @@ use Tahadudhiya\SmartLinks\models\TargetIdentity;
 use Tahadudhiya\SmartLinks\records\HealthHistoryRecord;
 use Tahadudhiya\SmartLinks\records\HealthRecord;
 use Tahadudhiya\SmartLinks\records\IndexRecord;
+use Tahadudhiya\SmartLinks\records\SourceRecord;
 use Tahadudhiya\SmartLinks\records\UsageRecord;
 use Tahadudhiya\SmartLinks\services\Index;
+use Tahadudhiya\SmartLinks\services\Presets;
 use Tahadudhiya\SmartLinks\SmartLinks;
+use Tahadudhiya\SmartLinks\Tests\_support\ProjectConfigSandbox;
 use Tahadudhiya\SmartLinks\Tests\_support\StaleIndex;
 use yii\db\IntegrityException;
 use yii\db\TableSchema;
@@ -45,6 +49,7 @@ class SchemaTest extends TestCase
     private const TABLES = [
         IndexRecord::TABLE,
         UsageRecord::TABLE,
+        SourceRecord::TABLE,
         HealthRecord::TABLE,
         HealthHistoryRecord::TABLE,
     ];
@@ -63,6 +68,8 @@ class SchemaTest extends TestCase
             'targetElementId' => 'projection',
             'targetSiteId' => 'projection',
             'resolvedUrl' => 'projection',
+            'targetLabel' => 'projection',
+            'targetStatus' => 'projection',
             'healthUrlHash' => 'projection',
             'dateCreated' => 'bookkeeping',
             'dateUpdated' => 'bookkeeping',
@@ -78,6 +85,17 @@ class SchemaTest extends TestCase
             'fieldId' => 'reference',
             'sortOrder' => 'ordering',
             'label' => 'projection',
+            'dateCreated' => 'bookkeeping',
+            'dateUpdated' => 'bookkeeping',
+            'uid' => 'bookkeeping',
+        ],
+        SourceRecord::TABLE => [
+            'id' => 'key',
+            'elementId' => 'identity',
+            'siteId' => 'identity',
+            'elementDateUpdated' => 'projection',
+            'unreadableValues' => 'projection',
+            'dateIndexed' => 'bookkeeping',
             'dateCreated' => 'bookkeeping',
             'dateUpdated' => 'bookkeeping',
             'uid' => 'bookkeeping',
@@ -125,6 +143,11 @@ class SchemaTest extends TestCase
             ['indexId', false],
             ['siteId', false],
             ['fieldId', false],
+        ],
+        SourceRecord::TABLE => [
+            ['elementId,siteId', true],
+            ['dateIndexed', false],
+            ['siteId', false],
         ],
         HealthRecord::TABLE => [
             ['urlHash', true],
@@ -224,6 +247,8 @@ class SchemaTest extends TestCase
         // has to outlive the element it points at to be reported as missing.
         self::assertSame([
             'smartlinks_health_history.healthId' => 'smartlinks_health CASCADE',
+            'smartlinks_sources.elementId' => 'elements CASCADE',
+            'smartlinks_sources.siteId' => 'sites CASCADE',
             'smartlinks_usage.elementId' => 'elements CASCADE',
             'smartlinks_usage.fieldId' => 'fields CASCADE',
             'smartlinks_usage.indexId' => 'smartlinks_index CASCADE',
@@ -243,6 +268,12 @@ class SchemaTest extends TestCase
             foreach (HealthFailure::values() as $value) {
                 self::assertLessThanOrEqual($columns['failure']->size, strlen($value), "$table.failure: $value");
             }
+        }
+
+        $targetStatus = $this->tableSchema(IndexRecord::TABLE)->columns['targetStatus'];
+
+        foreach (ResolutionStatus::cases() as $status) {
+            self::assertLessThanOrEqual($targetStatus->size, strlen($status->value), "targetStatus: $status->value");
         }
     }
 
@@ -562,15 +593,32 @@ class SchemaTest extends TestCase
         $schema = $this->schemaSnapshot();
         $otherTables = $this->otherTables();
         $craft = $this->craftDigests();
+        $projectConfig = Craft::$app->getProjectConfig();
 
-        $this->quietly(fn() => (new Install())->safeDown());
+        // Smart Links' configuration is taken away too, whatever the host project has of it.
+        ProjectConfigSandbox::open();
+        $projectConfig->set(Presets::CONFIG_KEY . '.' . StringHelper::UUID(), ['name' => 'Removed on uninstall', 'sortOrder' => 99]);
 
         try {
-            self::assertSame([], $this->installedTables());
-            self::assertSame($otherTables, $this->otherTables());
-            self::assertSame($craft, $this->craftDigests());
+            $this->quietly(fn() => (new Install())->safeDown());
+
+            try {
+                self::assertSame([], $this->installedTables());
+                self::assertSame($otherTables, $this->otherTables());
+                self::assertNull($projectConfig->get(SmartLinks::PROJECT_CONFIG_KEY));
+                // Project config changes are saved when a request ends: none of Craft's tables changed.
+                self::assertSame($craft, $this->craftDigests());
+            } finally {
+                $this->quietly(fn() => (new Install())->safeUp());
+            }
+
+            // The host's project config says the plugin is installed, as it does when the plugin
+            // is installed from another environment's: its configuration arrives with that, so
+            // installing adds no presets of its own.
+            self::assertNotNull($projectConfig->get('plugins.smart-links', true));
+            self::assertNull($projectConfig->get(Presets::CONFIG_KEY));
         } finally {
-            $this->quietly(fn() => (new Install())->safeUp());
+            ProjectConfigSandbox::close();
         }
 
         // Down and up are exact opposites: reinstalling gives back the schema that was removed.

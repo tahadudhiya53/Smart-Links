@@ -31,6 +31,9 @@ use yii\web\ForbiddenHttpException;
  */
 final class LinkEditor
 {
+    /** @var array<string, LinkPreset>|null */
+    private ?array $allPresets = null;
+
     /** The key new links are rendered under until the page gives them their own. */
     public const PLACEHOLDER = '__SMARTLINK__';
 
@@ -50,7 +53,10 @@ final class LinkEditor
      * @param string $name The input name the value posts under, before namespacing.
      * @param string $id The editor's ID, before namespacing.
      * @param list<string> $types Handles of the link types authors may add, in order.
-     * @param list<string> $presets UIDs of the presets authors may choose, in order.
+     * @param list<string> $presets UIDs of the presets authors may choose, in order: those the
+     * field allows that exist, are enabled, and are for a link type the editor offers.
+     * @param list<string> $allowedPresets UIDs of the presets the field allows, whatever their state:
+     * what a link is checked against (a disabled one only where a link already had it).
      * @param int|null $max The most links the value holds, or null for no limit.
      * @param string|null $namespace The input namespace the editor is rendered in.
      * @param array<string, mixed>|null $binding Which editor this is; null when it cannot be
@@ -62,6 +68,7 @@ final class LinkEditor
         public readonly string $id,
         public readonly array $types,
         public readonly array $presets,
+        public readonly array $allowedPresets,
         public readonly ?int $max,
         public readonly ?string $namespace,
         private readonly ?array $binding,
@@ -90,15 +97,44 @@ final class LinkEditor
     }
 
     /**
+     * Of the allowed presets, those authors are offered: the ones that exist, are enabled, and
+     * are for at least one of the link types offered, in the allowed order.
+     *
+     * @param list<string> $allowed
+     * @param list<string> $types
+     * @return list<string>
+     */
+    private static function offeredPresets(array $allowed, array $types): array
+    {
+        $all = SmartLinks::getInstance()->getPresets()->getAllPresets();
+
+        return array_values(array_filter($allowed, static function(string $uid) use ($all, $types): bool {
+            $preset = $all[$uid] ?? null;
+
+            return $preset !== null && $preset->enabled && array_filter($types, static fn(string $type): bool => $preset->isForType($type)) !== [];
+        }));
+    }
+
+    /**
+     * Every preset's UID: default links may use any preset.
+     *
+     * @return list<string>
+     */
+    private static function everyPreset(): array
+    {
+        return array_keys(SmartLinks::getInstance()->getPresets()->getAllPresets());
+    }
+
+    /**
      * The editor for a field's default links, in its settings. Defaults may use any registered
-     * type that can be a default (not one that links to elements) and any preset there; the
+     * type that can be a default (not one that links to elements) and any enabled preset for one
+     * of them; the
      * field's own rules are checked when the settings are saved. Its
      * context names the field whose settings these are; a field not saved yet cannot be named,
      * so its defaults editor offers no copying or pasting.
      */
     public static function forSettings(SmartLinkField $field): self
     {
-        $plugin = SmartLinks::getInstance();
         $binding = $field->uid === null ? null : [
             'scope' => self::SCOPE_SETTINGS,
             'field' => $field->uid,
@@ -107,7 +143,7 @@ final class LinkEditor
             'site' => null,
         ];
 
-        return self::create(SmartLinkField::DEFAULT_LINKS_INPUT, 'defaultLinks', self::defaultTypes(), array_keys($plugin->getPresets()->getAllPresets()), $field->maxCount(), $binding);
+        return self::create(SmartLinkField::DEFAULT_LINKS_INPUT, 'defaultLinks', self::defaultTypes(), self::everyPreset(), $field->maxCount(), $binding);
     }
 
     /**
@@ -124,10 +160,10 @@ final class LinkEditor
 
     /**
      * @param list<string> $types
-     * @param list<string> $presets
+     * @param list<string> $allowedPresets
      * @param array<string, mixed>|null $binding
      */
-    private static function create(string $name, string $id, array $types, array $presets, ?int $max, ?array $binding, ?int $siteId = null): self
+    private static function create(string $name, string $id, array $types, array $allowedPresets, ?int $max, ?array $binding, ?int $siteId = null): self
     {
         $view = Craft::$app->getView();
 
@@ -135,7 +171,7 @@ final class LinkEditor
             $binding += ['name' => $name, 'id' => $id, 'namespace' => $view->getNamespace(), 'editor' => $view->namespaceInputId($id)];
         }
 
-        return new self($name, $id, $types, $presets, $max, $view->getNamespace(), $binding, $siteId);
+        return new self($name, $id, $types, self::offeredPresets($allowedPresets, $types), $allowedPresets, $max, $view->getNamespace(), $binding, $siteId);
     }
 
     /**
@@ -168,8 +204,6 @@ final class LinkEditor
             throw new ForbiddenHttpException('User is not authorized to perform this action.');
         }
 
-        $plugin = SmartLinks::getInstance();
-
         if ($binding['scope'] === self::SCOPE_SETTINGS) {
             // Field settings are an admin's to change, as Craft's own fields controller requires.
             if (!$user->admin || !Craft::$app->getConfig()->getGeneral()->allowAdminChanges) {
@@ -183,12 +217,14 @@ final class LinkEditor
                 throw new BadRequestHttpException('The link editor’s field no longer exists.');
             }
 
-            return new self($binding['name'], $binding['id'], self::defaultTypes(), array_keys($plugin->getPresets()->getAllPresets()), $field->maxCount(), $binding['namespace'], $binding);
+            $types = self::defaultTypes();
+
+            return new self($binding['name'], $binding['id'], $types, self::offeredPresets(self::everyPreset(), $types), self::everyPreset(), $field->maxCount(), $binding['namespace'], $binding);
         }
 
         $field = self::boundField($binding, $user);
 
-        return new self($binding['name'], $binding['id'], $field->types, $field->presets, $field->maxCount(), $binding['namespace'], $binding, is_int($binding['site']) ? $binding['site'] : null);
+        return new self($binding['name'], $binding['id'], $field->types, self::offeredPresets($field->presets, $field->types), $field->presets, $field->maxCount(), $binding['namespace'], $binding, is_int($binding['site']) ? $binding['site'] : null);
     }
 
     /**
@@ -298,6 +334,10 @@ final class LinkEditor
             'The server ran into a problem. Try again in a moment.',
             'The request failed with status {status}. Reload the page and try again.',
             'Clear this value? What it holds now is removed when the element is saved.',
+            'Set by the “{preset}” preset.',
+            '“{preset}” preset applied.',
+            '“{preset}” preset applied, as a {type} link.',
+            'Preset removed.',
         ]);
 
         $newLink = null;
@@ -318,6 +358,9 @@ JS, [$view->namespaceInputId($this->id), [
             'newLinkJs' => $newLink['js'] ?? '',
             'context' => $this->context(),
             'destination' => $this->destination(),
+            // Every preset, so a link keeps showing what its preset locks even when it is no
+            // longer offered here.
+            'presets' => array_map(static fn(LinkPreset $preset): array => LinkForm::presetView($preset), $this->allPresets()),
         ]]);
 
         return $view->renderTemplate('smart-links/_field/input', [
@@ -439,22 +482,35 @@ JS, [$view->namespaceInputId($this->id), [
      */
     private function presetOptions(?string $current): array
     {
-        $all = SmartLinks::getInstance()->getPresets()->getAllPresets();
+        $all = $this->allPresets();
         $options = array_values(array_map(
-            static fn(LinkPreset $preset): array => ['label' => $preset->name, 'value' => $preset->uid],
+            static fn(LinkPreset $preset): array => ['label' => $preset->name, 'value' => (string)$preset->uid],
             array_filter(array_map(static fn(string $uid): ?LinkPreset => $all[$uid] ?? null, $this->presets)),
         ));
 
         if ($current !== null && !in_array($current, $this->presets, true)) {
             $options[] = [
-                'label' => isset($all[$current])
-                    ? Craft::t('smart-links', '{preset} (not allowed in this field)', ['preset' => $all[$current]->name])
-                    : Craft::t('smart-links', 'A preset that no longer exists ({uid})', ['uid' => $current]),
+                'label' => match (true) {
+                    !isset($all[$current]) => Craft::t('smart-links', 'A preset that no longer exists ({uid})', ['uid' => $current]),
+                    !$all[$current]->enabled => Craft::t('smart-links', '{preset} (disabled)', ['preset' => $all[$current]->name]),
+                    !in_array($current, $this->allowedPresets, true) => Craft::t('smart-links', '{preset} (not allowed in this field)', ['preset' => $all[$current]->name]),
+                    default => Craft::t('smart-links', '{preset} (not for this field’s link types)', ['preset' => $all[$current]->name]),
+                },
                 'value' => $current,
             ];
         }
 
         return $options;
+    }
+
+    /**
+     * Every preset, read once for this editor's rendering rather than once per link.
+     *
+     * @return array<string, LinkPreset>
+     */
+    private function allPresets(): array
+    {
+        return $this->allPresets ??= SmartLinks::getInstance()->getPresets()->getAllPresets();
     }
 
     private function registeredTypes(): \Tahadudhiya\SmartLinks\linktypes\LinkTypeSet

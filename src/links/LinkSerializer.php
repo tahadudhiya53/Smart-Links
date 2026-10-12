@@ -175,6 +175,47 @@ final class LinkSerializer
     }
 
     /**
+     * Link attributes on their own, in the stored form they have within a stored link, for
+     * configuration that holds attributes for links not made yet (a preset's defaults). Empty
+     * attributes are an empty array, as they are left out of a link.
+     *
+     * @return array<string, mixed>
+     * @throws LinkValidationException if the attributes break the link rules.
+     */
+    public function serializeAttributes(LinkAttributes $attributes): array
+    {
+        $errors = $this->validator->validateAttributes($attributes, null);
+
+        if ($errors !== []) {
+            throw new LinkValidationException($errors);
+        }
+
+        return $this->attributesToArray($attributes);
+    }
+
+    /**
+     * Reads attributes {@see serializeAttributes()} wrote, as strictly as a stored link's.
+     *
+     * @throws LinkValidationException if they are malformed, not canonical, or break the link rules.
+     */
+    public function deserializeAttributes(mixed $stored): LinkAttributes
+    {
+        if ($stored === []) {
+            return new LinkAttributes();
+        }
+
+        $errors = [];
+        $attributes = $this->attributesFromArray(['attributes' => $stored], '', $errors);
+        array_push($errors, ...($errors === [] ? $this->validator->validateAttributes($attributes, null) : []));
+
+        if ($errors !== []) {
+            throw new LinkValidationException($errors);
+        }
+
+        return $attributes;
+    }
+
+    /**
      * @return array<string, mixed>
      */
     private function attributesToArray(LinkAttributes $attributes): array

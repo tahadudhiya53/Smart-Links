@@ -7,6 +7,7 @@ use Tahadudhiya\SmartLinks\linktypes\LinkTypeDataInterface;
 use Tahadudhiya\SmartLinks\linktypes\LinkTypeSet;
 use Tahadudhiya\SmartLinks\models\InvalidLinkValue;
 use Tahadudhiya\SmartLinks\models\LinkCollection;
+use Tahadudhiya\SmartLinks\models\LinkPreset;
 use Tahadudhiya\SmartLinks\models\LinkValue;
 use Tahadudhiya\SmartLinks\models\ValidationError;
 
@@ -157,6 +158,58 @@ final class LinkForm
             'custom' => array_map(static fn(string $name, string $value): array => ['name' => $name, 'value' => $value], array_keys($attributes->custom), array_values($attributes->custom)),
             'stored' => null,
             'errors' => [],
+        ];
+    }
+
+    /**
+     * The inputs a preset's settings are in, by feature, as name suffixes of a link's inputs.
+     */
+    private const PRESET_INPUTS = [
+        'urlSuffix' => '[urlSuffix]',
+        'target' => '[attributes][target]',
+        'rel' => '[attributes][rel]',
+        'class' => '[attributes][class]',
+        'download' => '[attributes][download]',
+    ];
+
+    /**
+     * A preset as the editor applies it to a link's inputs: the value each of its settings puts
+     * in its input, by input name suffix, its custom attribute rows, and the value each locked
+     * input must keep (empty when the preset locks a setting it does not set). The editor knows
+     * nothing about presets beyond this.
+     *
+     * @return array{name: string, types: list<string>, values: array<string, string>, custom: list<array{name: string, value: string}>, locked: array<string, string>}
+     */
+    public static function presetView(LinkPreset $preset): array
+    {
+        $attributes = $preset->linkAttributes;
+        $values = [
+            'urlSuffix' => $preset->urlSuffix ?? '',
+            'target' => $attributes->target ?? '',
+            'rel' => implode(' ', $attributes->rel),
+            'class' => implode(' ', $attributes->class),
+            'download' => $attributes->download ? '1' : '',
+        ];
+
+        $inputs = [];
+        $locked = [];
+
+        foreach (self::PRESET_INPUTS as $feature => $suffix) {
+            if ($values[$feature] !== '') {
+                $inputs[$suffix] = $values[$feature];
+            }
+
+            if (in_array($feature, $preset->locked, true)) {
+                $locked[$suffix] = $values[$feature];
+            }
+        }
+
+        return [
+            'name' => $preset->name,
+            'types' => $preset->types,
+            'values' => $inputs,
+            'custom' => array_map(static fn(string $name, string $value): array => ['name' => $name, 'value' => $value], array_keys($attributes->custom), array_values($attributes->custom)),
+            'locked' => $locked,
         ];
     }
 

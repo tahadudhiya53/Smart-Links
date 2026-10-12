@@ -152,6 +152,24 @@ final class CanonicalUrl
     }
 
     /**
+     * This root-relative URL on the host of an absolute one (e.g. a site's base URL): the same
+     * path, query and fragment, served from that origin. A root-relative path is relative to the
+     * host's root, never to a base URL's own path.
+     *
+     * @throws InvalidArgumentException if this URL is not root-relative or the base is not absolute.
+     */
+    public function onOriginOf(self $base): self
+    {
+        if ($this->origin !== null || $base->origin === null) {
+            throw new InvalidArgumentException('Only a root-relative URL can be put on the origin of an absolute URL.');
+        }
+
+        // Parsed again so the path takes its canonical form for a URL with a host (`/.//a` is the
+        // path `//a`).
+        return self::parse($base->origin . $this->toString());
+    }
+
+    /**
      * SHA-256 of {@see healthUrl()}, the key health is stored under.
      */
     public function healthUrlHash(): ?string

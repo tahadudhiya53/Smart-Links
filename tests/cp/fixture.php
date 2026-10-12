@@ -7,12 +7,28 @@
 //   php fixture.php inspect <id> <site> prints an entry's stored links and relations in a site
 //   php fixture.php delete <id>         hard-deletes an element
 //   php fixture.php impersonate <id>    prints a one-hour sign-in URL for a user
+//   php fixture.php presets-setup       for managing presets through the control panel: records
+//                                       project config and its files, and creates a user with
+//                                       control panel access only
+//   php fixture.php presets             prints the presets as project config holds them, stored
+//   php fixture.php grant <id> <perm>   gives the presets phase's user “Access Smart Links”
+//                                       (`section`) or “Manage link presets” (`presets`) too
+//   php fixture.php presets-teardown    removes the user and any preset made since, puts the order
+//                                       back, then the files and the stored time of the last
+//                                       change, and says whether the project is as it was
+//   php fixture.php pending             says whether Craft sees project config changes pending
+//   php fixture.php set-preset-enabled <uid> <0|1>  disables or enables a preset
+//
+// Presets are managed through the control panel before any other content exists: the web server
+// writes project config files for every change it stores, including anything stored but not yet
+// written, so only then do its files hold nothing but the presets' own changes.
 //   php fixture.php log-mark            prints how long Craft's log files are now
 //   php fixture.php log-errors <mark>   prints the errors and warnings logged since the mark
 //   php fixture.php teardown            removes all of it, and says whether the project is as it was
 //
 // Everything created is recorded in .build/state.json, and project config is never written to
-// YAML. Setup snapshots the stored project config and the YAML files; teardown removes every record
+// YAML. Setup refuses a project whose project config has changes pending, and teardown puts back
+// the stored time of the last change, so the files and the stored config agree again afterwards. Setup snapshots the stored project config and the YAML files; teardown removes every record
 // it made, checks the database no longer has any of them, and compares both snapshots, so a run
 // leaves the project exactly as it found it.
 //
@@ -43,11 +59,15 @@ use craft\models\Section;
 use craft\models\Section_SiteSettings;
 use craft\models\Volume;
 use Tahadudhiya\SmartLinks\fields\SmartLinkField;
+use Tahadudhiya\SmartLinks\models\LinkAttributes;
+use Tahadudhiya\SmartLinks\models\LinkPreset;
+use Tahadudhiya\SmartLinks\services\Presets;
 use Tahadudhiya\SmartLinks\SmartLinks;
 
 require __DIR__ . '/../integration-bootstrap.php';
 
 const STATE = __DIR__ . '/.build/state.json';
+const PRESETS_STATE = __DIR__ . '/.build/presets-state.json';
 const TEMPLATE = '_smart-links-cp-test';
 
 $app = Craft::$app;
@@ -113,6 +133,10 @@ function remaining(array $created): array
     }
 
     foreach ($created as [$kind, $id]) {
+        if ($kind === 'preset' && Craft::$app->getProjectConfig()->get(Presets::CONFIG_KEY . ".$id") !== null) {
+            $left[] = [$kind, $id];
+        }
+
         if (isset($tables[$kind]) && (Craft::$app->getDb()->getTableSchema($tables[$kind]) !== null) && (new Query())->from($tables[$kind])->where(['id' => $id])->exists()) {
             $left[] = [$kind, $id];
         }
@@ -121,12 +145,109 @@ function remaining(array $created): array
     return $left;
 }
 
+/**
+ * How many rows Smart Links' link index holds. Index jobs the run queues are its own doing, so
+ * its rows must be back to these counts once those jobs have done their work.
+ *
+ * @return array<string, int>
+ */
+function indexCounts(): array
+{
+    return [
+        'index' => (int)(new Query())->from(\Tahadudhiya\SmartLinks\records\IndexRecord::TABLE)->count(),
+        'usage' => (int)(new Query())->from(\Tahadudhiya\SmartLinks\records\UsageRecord::TABLE)->count(),
+        'sources' => (int)(new Query())->from(\Tahadudhiya\SmartLinks\records\SourceRecord::TABLE)->count(),
+        'health' => (int)(new Query())->from(\Tahadudhiya\SmartLinks\records\HealthRecord::TABLE)->count(),
+    ];
+}
+
+/**
+ * The link index jobs queued after a queue job ID: the run's own, which a console process never
+ * runs by itself.
+ *
+ * @return list<string>
+ */
+function queuedIndexJobs(int $afterId, string $kind = ''): array
+{
+    return array_map('strval', (new Query())
+        ->select(['id'])
+        ->from(Table::QUEUE)
+        ->where(['>', 'id', $afterId])
+        ->andWhere(['like', 'description', 'link index'])
+        ->andFilterWhere(['like', 'description', $kind])
+        ->column());
+}
+
+/**
+ * Releases the index jobs queued since `$afterId`: the run has already done their work in process,
+ * and a job left queued would change what the pages show while the checks look at them.
+ */
+function releaseIndexJobs(int $afterId): void
+{
+    $queue = Craft::$app->getQueue();
+
+    if (!$queue instanceof \craft\queue\QueueInterface) {
+        fail('Queued index jobs can only be released from Craft’s own queue.');
+    }
+
+    foreach (queuedIndexJobs($afterId) as $jobId) {
+        $queue->release($jobId);
+    }
+}
+
 function yamlSnapshot(): string
 {
     $files = FileHelper::findFiles(Craft::$app->getPath()->getProjectConfigPath(), ['only' => ['*.yaml']]);
     sort($files);
 
     return hash('sha256', implode("\n", array_map(static fn(string $file): string => $file . ':' . hash_file('sha256', $file), $files)));
+}
+
+/**
+ * Every project config file, by path, as base64.
+ *
+ * @return array<string, string>
+ */
+function yamlFiles(): array
+{
+    $files = [];
+
+    foreach (FileHelper::findFiles(Craft::$app->getPath()->getProjectConfigPath(), ['only' => ['*.yaml']]) as $file) {
+        $files[$file] = base64_encode((string)file_get_contents($file));
+    }
+
+    ksort($files);
+
+    return $files;
+}
+
+/**
+ * Puts back the stored time of the last project config change, and drops Craft's cached copies
+ * of the stored config, of the files' times and of their differences, so the next request reads
+ * them again.
+ */
+function restoreDateModified(mixed $value): void
+{
+    Craft::$app->getDb()->createCommand()->update(Table::PROJECTCONFIG, ['value' => $value], ['path' => 'dateModified'])->execute();
+
+    foreach ([\craft\services\ProjectConfig::STORED_CACHE_KEY, \craft\services\ProjectConfig::CACHE_KEY, \craft\services\ProjectConfig::DIFF_CACHE_KEY] as $key) {
+        Craft::$app->getCache()->delete($key);
+    }
+}
+
+/**
+ * The presets' UIDs, in their order, as stored.
+ *
+ * @return list<string>
+ */
+function presetOrder(): array
+{
+    return array_keys(SmartLinks::getInstance()->getPresets()->getAllPresets());
+}
+
+function storedDateModified(): mixed
+{
+    return (new Query())->select(['value'])->from(Table::PROJECTCONFIG)->where(['path' => 'dateModified'])->scalar();
 }
 
 function check(bool $ok, string $what, mixed $errors = null): void
@@ -158,6 +279,18 @@ function call(mixed $object, string $method): mixed
     return $object->$method();
 }
 
+function removePreset(string $uid): bool
+{
+    $presets = SmartLinks::getInstance()->getPresets();
+    $preset = $presets->getPresetByUid($uid);
+
+    if ($preset !== null) {
+        $presets->deletePreset($preset);
+    }
+
+    return $presets->getPresetByUid($uid) === null;
+}
+
 function savedElement(mixed $element, string $what): Element
 {
     check(Craft::$app->getElements()->saveElement($element), "save $what", $element->getErrors());
@@ -167,8 +300,8 @@ function savedElement(mixed $element, string $what): Element
 
 switch ($command) {
     case 'setup':
-        if (is_file(STATE)) {
-            fail('A previous run was not torn down. Run `php tests/cp/fixture.php teardown` first.');
+        if (is_file(STATE) || is_file(PRESETS_STATE)) {
+            fail('A previous run was not torn down. Run `php tests/cp/fixture.php teardown` (and `presets-teardown`) first.');
         }
 
         $sites = $app->getSites();
@@ -179,7 +312,11 @@ switch ($command) {
             fail('The control panel test needs a second site.');
         }
 
-        $state = ['config' => configSnapshot(), 'yaml' => yamlSnapshot(), 'created' => []];
+        if ($app->getProjectConfig()->areChangesPending(null, true)) {
+            fail('The project config files and the stored project config differ. Apply or rebuild project config first.');
+        }
+
+        $state = ['config' => configSnapshot(), 'yaml' => yamlSnapshot(), 'yamlFiles' => yamlFiles(), 'dateModified' => storedDateModified(), 'index' => indexCounts(), 'queue' => (int)(new Query())->from(Table::QUEUE)->max('id'), 'created' => []];
         $record = static function(string $kind, int|string $id) use (&$state): void {
             $state['created'][] = [$kind, $id];
             save($state);
@@ -224,8 +361,13 @@ TWIG);
         $handles = SmartLinks::getInstance()->getLinkTypes()->getTypeSet()->handles();
         $fields = [];
 
+        // A preset the links field offers: for URL links, a new window, which it locks, and a class.
+        $preset = new LinkPreset(['name' => 'Smart Links CP preset', 'types' => ['url'], 'linkAttributes' => new LinkAttributes(target: '_blank', class: ['cp-cta']), 'locked' => ['target']]);
+        check(SmartLinks::getInstance()->getPresets()->savePreset($preset), 'save the preset', $preset->getErrors());
+        $record('preset', (string)$preset->uid);
+
         foreach ([
-            'smartLinksCpLinks' => ['types' => $handles, 'translationMethod' => SmartLinkField::TRANSLATION_METHOD_SITE],
+            'smartLinksCpLinks' => ['types' => $handles, 'presets' => [$preset->uid], 'translationMethod' => SmartLinkField::TRANSLATION_METHOD_SITE],
             'smartLinksCpOne' => ['types' => ['url', 'entry'], 'multiple' => false],
         ] as $handle => $settings) {
             $field = $app->getFields()->createField(['type' => SmartLinkField::class, 'name' => $handle, 'handle' => $handle] + $settings);
@@ -286,6 +428,7 @@ TWIG);
         };
 
         $page = $entry('smartLinksCpPages', 'CP page');
+        $presetPage = $entry('smartLinksCpPages', 'CP preset page');
         $graphqlEntry = $entry('smartLinksCpPages', 'CP graphql');
         $target = $entry('smartLinksCpPages', 'CP target');
         $doomed = $entry('smartLinksCpPages', 'CP doomed');
@@ -375,6 +518,49 @@ TWIG);
         endRequest();
         $configStored = configSnapshot() !== $state['config'];
 
+        // The link inventory: users with and without its permissions, and a page whose links fill
+        // more than one of its pages, with a label written as markup, another field's link, and its
+        // own value in the second site.
+        $inventoryUsers = [];
+
+        foreach ([
+            'viewer' => ['accessCp', 'accessPlugin-smart-links', SmartLinks::PERMISSION_VIEW_INVENTORY],
+            // Also sees where links are used, which the viewer does not.
+            'rebuilder' => ['accessCp', 'accessPlugin-smart-links', SmartLinks::PERMISSION_VIEW_INVENTORY, SmartLinks::PERMISSION_VIEW_USAGE, SmartLinks::PERMISSION_REBUILD_INDEX],
+            'outsider' => ['accessCp', 'accessPlugin-smart-links'],
+        ] as $role => $permissions) {
+            $user = new User(['username' => "smartlinks-cp-$role-" . bin2hex(random_bytes(3)), 'email' => "smartlinks-cp-$role-" . bin2hex(random_bytes(3)) . '@example.test', 'active' => true]);
+            check($app->getElements()->saveElement($user), "save the inventory $role", $user->getErrors());
+            $record('element', (int)$user->id);
+            $app->getUserPermissions()->saveUserPermissions((int)$user->id, $permissions);
+            $inventoryUsers[$role] = (int)$user->id;
+        }
+
+        $inventoryLinks = [];
+
+        for ($i = 1; $i <= 51; $i++) {
+            $inventoryLinks[] = ['type' => 'url', 'data' => ['url' => sprintf('https://inventory.example.test/page-%02d', $i)]];
+        }
+
+        $inventoryLinks[] = ['type' => 'url', 'data' => ['url' => 'https://inventory.example.test/marked-up'], 'label' => '<b>Bold</b> & "quoted"'];
+        $inventoryLinks[] = ['type' => 'email', 'data' => ['address' => 'inventory@example.test']];
+        $links = SmartLinks::getInstance()->getLinks()->getNormalizer();
+        $inventoryPage = new Entry(['sectionId' => $sections['smartLinksCpPages']->id, 'typeId' => $entryType->id, 'siteId' => $primary->id, 'title' => 'CP inventory', 'slug' => 'cp-inventory']);
+        $inventoryPage->setFieldValue('smartLinksCpLinks', $links->normalize($inventoryLinks)->value);
+        $inventoryPage->setFieldValue('smartLinksCpOne', $links->normalize([['type' => 'url', 'data' => ['url' => 'https://inventory.example.test/one-field']]])->value);
+        savedElement($inventoryPage, 'the inventory page');
+        $record('element', (int)$inventoryPage->id);
+        $inventorySecond = Entry::find()->id($inventoryPage->id)->siteId($second->id)->status(null)->one() ?? fail('The inventory page is not in the second site.');
+        $inventorySecond->setFieldValue('smartLinksCpLinks', $links->normalize([['type' => 'url', 'data' => ['url' => 'https://inventory.example.test/second-only']]])->value);
+        savedElement($inventorySecond, 'the inventory page in the second site');
+
+        // What a health check would have observed of one of them.
+        $brokenUrl = \Tahadudhiya\SmartLinks\models\CanonicalUrl::parse('https://inventory.example.test/page-01');
+        $health = new \Tahadudhiya\SmartLinks\records\HealthRecord();
+        $health->setAttributes(['url' => $brokenUrl->healthUrl(), 'urlHash' => $brokenUrl->healthUrlHash(), 'state' => 'broken', 'statusCode' => 404, 'finalUrl' => $brokenUrl->healthUrl(), 'dateChecked' => \craft\helpers\Db::prepareDateForDb(new DateTime())], false);
+        check($health->save(false), 'save the health observation');
+        $record('health', (int)$health->id);
+
         echo Json::encode([
             'primarySite' => ['id' => (int)$primary->id, 'handle' => $primary->handle, 'name' => $primary->getName()],
             'secondSite' => ['id' => (int)$second->id, 'handle' => $second->handle, 'name' => $second->getName()],
@@ -383,6 +569,8 @@ TWIG);
             'authorId' => $authorId,
             'page' => ['id' => (int)$page->id, 'editUrl' => $page->getCpEditUrl(), 'url' => $page->getUrl()],
             'graphqlEntry' => ['id' => (int)$graphqlEntry->id],
+            'preset' => ['uid' => $preset->uid, 'name' => $preset->name],
+            'presetPage' => ['id' => (int)$presetPage->id, 'editUrl' => $presetPage->getCpEditUrl()],
             'gqlToken' => $accessToken,
             'privateEditSection' => 'smartLinksCpPrivate',
             'target' => ['id' => (int)$target->id, 'title' => $target->title, 'url' => $target->getUrl()],
@@ -395,6 +583,7 @@ TWIG);
             'product' => $product !== null ? ['id' => (int)$product->id, 'title' => $product->title, 'url' => $product->getUrl()] : null,
             'cpUrl' => UrlHelper::cpUrl(),
             'configStored' => $configStored,
+            'inventory' => $inventoryUsers + ['pageId' => (int)$inventoryPage->id, 'secondSite' => $second->handle],
             // The element index sources the picker opens on, for each element type.
             'sources' => [
                 'entry' => 'section:' . $sections['smartLinksCpPages']->uid,
@@ -455,6 +644,222 @@ TWIG);
         echo Json::encode(['url' => UrlHelper::urlWithToken(UrlHelper::cpUrl(), $token)]);
         break;
 
+    case 'presets':
+        echo Json::encode((new Query())->select(['path', 'value'])->from(Table::PROJECTCONFIG)->where(['like', 'path', Presets::CONFIG_KEY . '.%', false])->orderBy(['path' => SORT_ASC])->pairs());
+        break;
+
+    case 'grant':
+        // Only the presets phase's own user, and only these two permissions.
+        $presetsState = Json::decode((string)file_get_contents(PRESETS_STATE));
+        $id = (int)($argv[2] ?? 0);
+        $permission = ['section' => 'accessPlugin-smart-links', 'presets' => SmartLinks::PERMISSION_MANAGE_PRESETS][$argv[3] ?? ''] ?? fail('Unknown permission.');
+        check($id === $presetsState['authorId'], 'grant a permission to that user, who is not the presets phase’s');
+        $app->getUserPermissions()->saveUserPermissions($id, array_merge($app->getUserPermissions()->getPermissionsByUserId($id), [$permission]));
+        echo Json::encode(['granted' => $permission]);
+        break;
+
+    case 'presets-setup':
+        if (is_file(PRESETS_STATE) || is_file(STATE)) {
+            fail('A previous run was not torn down. Run `php tests/cp/fixture.php presets-teardown` (and `teardown`) first.');
+        }
+
+        if ($app->getProjectConfig()->areChangesPending(null, true)) {
+            fail('The project config files and the stored project config differ. Apply or rebuild project config first.');
+        }
+
+        $presetsState = ['yamlFiles' => yamlFiles(), 'dateModified' => storedDateModified(), 'config' => configSnapshot(), 'presets' => presetOrder(), 'authorId' => null];
+        FileHelper::writeToFile(PRESETS_STATE, Json::encode($presetsState));
+
+        $author = new User(['username' => 'smartlinks-cp-presets-' . bin2hex(random_bytes(3)), 'email' => 'smartlinks-cp-presets-' . bin2hex(random_bytes(3)) . '@example.test', 'active' => true]);
+
+        if ($app->getElements()->saveElement($author)) {
+            $presetsState['authorId'] = (int)$author->id;
+            FileHelper::writeToFile(PRESETS_STATE, Json::encode($presetsState));
+            $app->getUserPermissions()->saveUserPermissions((int)$author->id, ['accessCp']);
+        }
+
+        endRequest();
+        $admin = User::find()->admin()->status(null)->one() ?? fail('There is no admin user.');
+
+        echo Json::encode(['adminId' => (int)$admin->id, 'authorId' => $presetsState['authorId'], 'cpUrl' => UrlHelper::cpUrl(), 'presets' => presetOrder()]);
+        break;
+
+    case 'presets-teardown':
+        // Whatever the run left (a preset it made, another order), as it would have undone it
+        // itself had it got that far; then the user. Then the files, which the web server wrote
+        // and which by now differ, if at all, only in the time of the last change, are put back
+        // with that stored time.
+        $presetsState = Json::decode((string)file_get_contents(PRESETS_STATE));
+        $presets = SmartLinks::getInstance()->getPresets();
+
+        foreach ($presets->getAllPresets() as $uid => $preset) {
+            if (!in_array($uid, $presetsState['presets'], true)) {
+                $presets->deletePreset($preset);
+            }
+        }
+
+        if (presetOrder() !== $presetsState['presets']) {
+            $presets->reorderPresets($presetsState['presets']);
+        }
+
+        if ($presetsState['authorId'] !== null && ($author = User::find()->id($presetsState['authorId'])->status(null)->one()) !== null) {
+            $app->getElements()->deleteElement($author, true);
+        }
+
+        endRequest();
+        $before = $presetsState['yamlFiles'];
+        $now = yamlFiles();
+        $changed = array_values(array_filter(array_unique(array_merge(array_keys($before), array_keys($now))), static fn(string $file): bool => ($before[$file] ?? null) !== ($now[$file] ?? null)));
+        $withoutTime = static fn(?string $base64): ?string => $base64 === null ? null : preg_replace('/^dateModified: \d+$/m', '', (string)base64_decode($base64));
+        $unexpected = array_values(array_filter($changed, static fn(string $file): bool => $withoutTime($before[$file] ?? null) !== $withoutTime($now[$file] ?? null)));
+        $configRestored = configSnapshot() === $presetsState['config'];
+
+        if ($unexpected === [] && $configRestored) {
+            foreach ($changed as $file) {
+                file_put_contents($file, base64_decode($before[$file]));
+            }
+
+            restoreDateModified($presetsState['dateModified']);
+        }
+
+        $result = [
+            'changed' => array_map('basename', $changed),
+            'unexpected' => array_map('basename', $unexpected),
+            'configRestored' => $configRestored,
+            'restored' => $unexpected === [] && $configRestored && yamlFiles() === $before && storedDateModified() === $presetsState['dateModified'],
+            'userRemoved' => $presetsState['authorId'] === null || !(new Query())->from(Table::ELEMENTS)->where(['id' => $presetsState['authorId']])->exists(),
+        ];
+
+        if ($result['restored'] && $result['userRemoved']) {
+            unlink(PRESETS_STATE);
+        }
+
+        echo Json::encode($result);
+        exit($result['restored'] && $result['userRemoved'] ? 0 : 1);
+
+    case 'set-preset-enabled':
+        $app->getProjectConfig()->set(Presets::CONFIG_KEY . '.' . ($argv[2] ?? '') . '.enabled', ($argv[3] ?? '') === '1');
+        endRequest();
+        echo Json::encode(['enabled' => ($argv[3] ?? '') === '1']);
+        break;
+
+    case 'index':
+        // The index brought up to date with everything the run made, as a rebuild does.
+        $result = SmartLinks::getInstance()->getIndex()->rebuild();
+        echo Json::encode(['problems' => $result->problems, 'stale' => SmartLinks::getInstance()->getIndex()->status()->isStale()]);
+        break;
+
+    case 'index-status':
+        $state = Json::decode((string)file_get_contents(STATE));
+        $status = SmartLinks::getInstance()->getIndex()->status();
+        echo Json::encode(['stale' => $status->isStale(), 'unindexed' => $status->unindexedSources, 'queuedRebuilds' => count(queuedIndexJobs((int)$state['queue'], 'Rebuilding'))]);
+        break;
+
+    case 'make-stale':
+        // The inventory page saved since it was indexed, as far as the index can tell.
+        $state = Json::decode((string)file_get_contents(STATE));
+        $pageId = (int)($argv[2] ?? 0);
+        check(in_array(['element', $pageId], $state['created'], true), 'make one of the run’s own elements look saved');
+        \craft\helpers\Db::update(Table::ELEMENTS, ['dateUpdated' => \craft\helpers\Db::prepareDateForDb(new DateTime('+1 minute'))], ['id' => $pageId]);
+        echo Json::encode(['stale' => SmartLinks::getInstance()->getIndex()->status()->isStale()]);
+        break;
+
+    case 'usage-setup':
+        // Where links are used: one target used more often than a page holds, one in a nested
+        // entry, one in a page to be trashed, and a link to an entry that is then deleted. The index
+        // is brought up to date here, and the jobs the saves queued are released, so what the pages
+        // show is decided by the checks, never by the queue running meanwhile.
+        $state = Json::decode((string)file_get_contents(STATE));
+        $queuedBefore = (int)(new Query())->from(Table::QUEUE)->max('id');
+        $links = SmartLinks::getInstance()->getLinks()->getNormalizer();
+        $layoutEntryType = $app->getEntries()->getEntryTypeByHandle('smartLinksCpPage') ?? fail('No page entry type.');
+        $section = $app->getEntries()->getSectionByHandle('smartLinksCpPages') ?? fail('No pages section.');
+        $primary = $app->getSites()->getPrimarySite();
+        $record = static function(string $kind, int|string $id) use (&$state): void {
+            $state['created'][] = [$kind, $id];
+            file_put_contents(STATE, Json::encode($state));
+        };
+        $page = static function(string $title, array $values) use ($links, $layoutEntryType, $section, $primary, $record): Entry {
+            $entry = new Entry(['sectionId' => $section->id, 'typeId' => $layoutEntryType->id, 'siteId' => $primary->id, 'title' => $title, 'slug' => str_replace(' ', '-', strtolower($title))]);
+
+            foreach ($values as $handle => $value) {
+                $entry->setFieldValue($handle, $links->normalize($value)->value);
+            }
+
+            savedElement($entry, "the entry $title");
+            $record('element', (int)$entry->id);
+
+            return $entry;
+        };
+        $url = static fn(string $path): array => ['type' => 'url', 'data' => ['url' => "https://usage.example.test/$path"]];
+
+        $many = $page('CP usage many', ['smartLinksCpLinks' => array_fill(0, 55, $url('many')), 'smartLinksCpOne' => [$url('many')]]);
+        $nestedPage = $page('CP usage nested', []);
+        $block = new Entry(['typeId' => $app->getEntries()->getEntryTypeByHandle('smartLinksCpBlock')?->id, 'fieldId' => $app->getFields()->getFieldByHandle('smartLinksCpBlocks')?->id, 'ownerId' => $nestedPage->id, 'siteId' => $primary->id]);
+        $block->setFieldValue('smartLinksCpOne', $links->normalize([$url('nested')])->value);
+        savedElement($block, 'the nested entry');
+        $trashed = $page('CP usage trashed', ['smartLinksCpOne' => [$url('trashed')]]);
+        $target = $page('CP usage target', []);
+        $linker = $page('CP usage linker', ['smartLinksCpOne' => [['type' => 'entry', 'data' => ['elementId' => $target->id]]]]);
+        check($app->getElements()->deleteElement($target), 'delete the linked entry');
+
+        $result = SmartLinks::getInstance()->getIndex()->rebuild();
+        check($result->problemCount === 0, 'index the usage content', $result->problems);
+
+        releaseIndexJobs($queuedBefore);
+
+        $indexId = static fn(string $key): int => (int)\Tahadudhiya\SmartLinks\records\IndexRecord::findOne(['targetKey' => $key])?->id ?: fail("No target $key.");
+        $urlKey = static fn(string $path): string => 'url?url=' . rawurlencode("https://usage.example.test/$path");
+        endRequest();
+        echo Json::encode([
+            'many' => $indexId($urlKey('many')),
+            'nested' => $indexId($urlKey('nested')),
+            'trashed' => $indexId($urlKey('trashed')),
+            'oneField' => $indexId('url?url=' . rawurlencode('https://inventory.example.test/one-field')),
+            'deletedTarget' => $indexId("entry?elementId=$target->id&siteId=$primary->id"),
+            'manyPage' => ['id' => (int)$many->id, 'editUrl' => $many->getCpEditUrl()],
+            'nestedPage' => ['id' => (int)$nestedPage->id, 'title' => $nestedPage->title, 'editUrl' => $nestedPage->getCpEditUrl()],
+            'trashedPage' => (int)$trashed->id,
+            'linker' => (int)$linker->id,
+        ]);
+        break;
+
+    case 'usage-stale':
+        // One of the run's own elements trashed behind Craft's back: no event, so no update job,
+        // and the index shows it as it was until it is rebuilt.
+        $state = Json::decode((string)file_get_contents(STATE));
+        $elementId = (int)($argv[2] ?? 0);
+        check(in_array(['element', $elementId], $state['created'], true), 'trash one of the run’s own elements');
+        \craft\helpers\Db::update(Table::ELEMENTS, ['dateDeleted' => \craft\helpers\Db::prepareDateForDb(new DateTime())], ['id' => $elementId]);
+        echo Json::encode(['trashed' => $elementId]);
+        break;
+
+    case 'usage-field':
+        // A field of the run renamed or deleted, as an administrator would, with the index jobs that
+        // queues released, so the pages show what the index holds until it is rebuilt.
+        $state = Json::decode((string)file_get_contents(STATE));
+        $queuedBefore = (int)(new Query())->from(Table::QUEUE)->max('id');
+        $field = $app->getFields()->getFieldByHandle((string)($argv[3] ?? '')) ?? fail('No such field.');
+        check(in_array(['field', (int)$field->id], $state['created'], true), 'change one of the run’s own fields');
+
+        if (($argv[2] ?? '') === 'rename') {
+            $field->name = (string)($argv[4] ?? '');
+            check($app->getFields()->saveField($field), 'rename the field', $field->getErrors());
+        } else {
+            check($app->getFields()->deleteField($field), 'delete the field');
+        }
+
+        endRequest();
+
+        releaseIndexJobs($queuedBefore);
+
+        echo Json::encode(['fieldId' => (int)$field->id]);
+        break;
+
+    case 'pending':
+        echo Json::encode(['pending' => $app->getProjectConfig()->areChangesPending(null, true)]);
+        break;
+
     case 'log-mark':
         $files = glob($app->getPath()->getLogPath() . '/*.log') ?: [];
         echo Json::encode(array_combine($files, array_map('filesize', $files)));
@@ -503,6 +908,8 @@ TWIG);
                     'gqlToken' => $app->getGql()->getTokenById((int)$id) === null || $app->getGql()->deleteTokenById((int)$id),
                     'gqlSchema' => ($schema = $app->getGql()->getSchemaById((int)$id)) === null || $app->getGql()->deleteSchema($schema),
                     'productType' => ($commerce = $app->getPlugins()->getPlugin('commerce')) === null || call($commerce, 'getProductTypes')->deleteProductTypeById((int)$id),
+                    'preset' => removePreset((string)$id),
+                    'health' => \Tahadudhiya\SmartLinks\records\HealthRecord::findOne((int)$id)?->delete() !== false,
                     'file' => !file_exists((string)$id) || unlink((string)$id),
                     'directory' => removeDirectory((string)$id),
                     // Removed with their owners, and purged below.
@@ -538,11 +945,41 @@ TWIG);
             }
         }
 
+        // What the index jobs queued by deleting the run's content would do, done here, as the
+        // queue would; then those jobs, with nothing left to do, are released.
+        $elementIds = array_map('intval', array_column(array_filter($state['created'], static fn(array $item): bool => $item[0] === 'element'), 1));
+        SmartLinks::getInstance()->getIndex()->updateElements($elementIds);
+
+        $queue = $app->getQueue();
+
+        // Craft's own queue can release a job; any other leaves it, and it is reported below.
+        if ($queue instanceof \craft\queue\QueueInterface) {
+            foreach (queuedIndexJobs((int)($state['queue'] ?? 0)) as $jobId) {
+                $queue->release($jobId);
+            }
+        }
+
+        foreach (indexCounts() as $table => $count) {
+            if ($count !== ($state['index'][$table] ?? 0)) {
+                $leftovers[] = ["smartlinks $table rows", $count - ($state['index'][$table] ?? 0)];
+            }
+        }
+
+        if (queuedIndexJobs((int)($state['queue'] ?? 0)) !== []) {
+            $leftovers[] = ['queued link index jobs', count(queuedIndexJobs((int)($state['queue'] ?? 0)))];
+        }
+
         $result = [
             'leftovers' => array_merge($leftovers, remaining($state['created'])),
             'configRestored' => configSnapshot() === $state['config'],
             'yamlUnchanged' => yamlSnapshot() === $state['yaml'],
         ];
+
+        // Removing the run's records stored a new time of the last change, which the files,
+        // never written, do not have. Once all else is as it was, the stored time is too.
+        if ($result['leftovers'] === [] && $result['configRestored'] && $result['yamlUnchanged']) {
+            restoreDateModified($state['dateModified']);
+        }
         $leftovers = $result['leftovers'];
 
         if ($leftovers === [] && $result['configRestored'] && $result['yamlUnchanged']) {

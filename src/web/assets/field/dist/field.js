@@ -13,6 +13,14 @@
  * starts, so no two links can share a key however operations overlap or whichever finishes
  * first. One request to the server runs at a time; while it does, the editor is busy and its
  * copying, duplicating and pasting wait, and what comes back is applied only if it still fits.
+ *
+ * Choosing a preset fills in the inputs it has values for, and only those that are still empty:
+ * what a link already has, and what the author typed, always win. Choosing another preset (or
+ * none) takes back only what the last one filled in and nobody has changed since. Inputs the
+ * preset locks are set to its value and are read-only while it is chosen; when it is no longer
+ * chosen, an input it overwrote gets back what it had. A stored link's values are its own: the
+ * editor never changes them when it opens. Which inputs a preset fills, and with what, comes from
+ * the server; nothing here knows what any preset is.
  */
 (function ($) {
   'use strict';
@@ -98,6 +106,7 @@
 
       const $type = $link.find('[data-smartlinks-type]').first();
       this.addListener($type, 'change', () => this.showType($link));
+      this.addListener(this.presetSelect($link), 'change', () => this.choosePreset($link));
 
       this.addListener($link.find('[data-smartlinks-label]'), 'input', () => this.updateTitle($link));
 
@@ -115,6 +124,241 @@
           $remove.closest('[data-smartlinks-custom-row-item]').remove();
         }
       });
+
+      this.initPreset($link);
+    },
+
+    presetSelect: function ($link) {
+      return $link.find('[data-smartlinks-preset]').first();
+    },
+
+    preset: function (uid) {
+      const presets = this.settings.presets || {};
+
+      return uid && Object.prototype.hasOwnProperty.call(presets, uid) ? presets[uid] : null;
+    },
+
+    /**
+     * The input a preset setting goes in, by the end of its name. A checkbox's hidden partner and
+     * the copy a locked input posts are not it.
+     */
+    presetInput: function ($link, suffix) {
+      const end = '[links][' + $link.attr('data-key') + ']' + suffix;
+
+      return $link.find(':input').filter((index, input) => {
+        return input.type !== 'hidden' && typeof input.name === 'string' && input.name.slice(-end.length) === end;
+      }).first();
+    },
+
+    inputValue: function ($input) {
+      return $input.is(':checkbox') ? ($input.prop('checked') ? '1' : '') : String($input.val() || '');
+    },
+
+    setInputValue: function ($input, value) {
+      if ($input.is(':checkbox')) {
+        $input.prop('checked', value === '1');
+      } else {
+        // A browsing context name the select does not list yet.
+        if ($input.is('select') && value !== '' && !$input.find('option').filter((index, option) => option.value === value).length) {
+          $('<option>').val(value).text(value).appendTo($input);
+        }
+
+        $input.val(value);
+      }
+
+      $input.trigger('change');
+    },
+
+    /**
+     * A link as it opens: its values stay exactly as they are. What its preset locks is shown
+     * as read-only where the link has the preset's value; where it differs, it stays editable so
+     * the author can correct it (the server says why it is refused).
+     */
+    initPreset: function ($link) {
+      const uid = this.presetSelect($link).val() || null;
+      const preset = this.preset(uid);
+      const locks = {};
+
+      if (preset) {
+        Object.keys(preset.locked).forEach((suffix) => {
+          const $input = this.presetInput($link, suffix);
+
+          if ($input.length && this.inputValue($input) === preset.locked[suffix]) {
+            locks[suffix] = {value: preset.locked[suffix]};
+          }
+        });
+      }
+
+      $link.data('smartlinksPreset', uid);
+      $link.data('smartlinksLocks', locks);
+      this.applyLocks($link);
+    },
+
+    choosePreset: function ($link) {
+      const uid = this.presetSelect($link).val() || null;
+      const preset = this.preset(uid);
+
+      this.releasePreset($link);
+      $link.data('smartlinksPreset', uid);
+
+      if (!preset) {
+        Craft.cp.announce(Craft.t('smart-links', 'Preset removed.'));
+
+        return;
+      }
+
+      const typeName = this.switchToPresetType($link, preset);
+
+      Object.keys(preset.values).forEach((suffix) => {
+        const $input = this.presetInput($link, suffix);
+
+        if ($input.length && this.inputValue($input) === '') {
+          this.setInputValue($input, preset.values[suffix]);
+          $input.attr('data-smartlinks-filled', preset.values[suffix]);
+        }
+      });
+
+      const names = $link.find('[data-smartlinks-custom-rows] input[name$="[name]"]').map((index, input) => input.value).get();
+
+      preset.custom.forEach((row) => {
+        if (names.indexOf(row.name) === -1) {
+          const $row = this.addRow($link, undefined, row);
+          $row && $row.attr('data-smartlinks-filled', JSON.stringify(row));
+        }
+      });
+
+      const locks = {};
+
+      Object.keys(preset.locked).forEach((suffix) => {
+        const $input = this.presetInput($link, suffix);
+
+        if (!$input.length) {
+          return;
+        }
+
+        // What it had is kept, to be given back when the preset is no longer chosen.
+        locks[suffix] = {value: preset.locked[suffix], before: this.inputValue($input)};
+        this.setInputValue($input, preset.locked[suffix]);
+      });
+
+      $link.data('smartlinksLocks', locks);
+      this.applyLocks($link);
+      Craft.cp.announce(typeName
+        ? Craft.t('smart-links', '“{preset}” preset applied, as a {type} link.', {preset: preset.name, type: typeName})
+        : Craft.t('smart-links', '“{preset}” preset applied.', {preset: preset.name}));
+    },
+
+    /**
+     * Takes back what the chosen preset did and nobody has changed since: its locks, giving
+     * locked inputs back what they had, and the values it filled in. Anything changed since is
+     * the author's, and stays.
+     */
+    releasePreset: function ($link) {
+      const locks = $link.data('smartlinksLocks') || {};
+
+      $link.data('smartlinksLocks', {});
+      this.applyLocks($link);
+
+      Object.keys(locks).forEach((suffix) => {
+        const $input = this.presetInput($link, suffix);
+
+        if ($input.length && Object.prototype.hasOwnProperty.call(locks[suffix], 'before') && this.inputValue($input) === locks[suffix].value) {
+          this.setInputValue($input, locks[suffix].before);
+        }
+      });
+
+      $link.find('[data-smartlinks-filled]').each((index, element) => {
+        const $element = $(element);
+        const filled = $element.attr('data-smartlinks-filled');
+        $element.removeAttr('data-smartlinks-filled');
+
+        if ($element.is('[data-smartlinks-custom-row-item]')) {
+          const row = JSON.parse(filled);
+
+          if ($element.find('input[name$="[name]"]').val() === row.name && $element.find('input[name$="[value]"]').val() === row.value) {
+            $element.remove();
+          }
+        } else if (this.inputValue($element) === filled) {
+          this.setInputValue($element, '');
+        }
+      });
+    },
+
+    /**
+     * Switches a link to the first type the preset is for that the editor offers, when its own
+     * type is not one of them. Its data for the type it had stays in the form, so switching back
+     * gets it back. The new type's name, or null when nothing changed.
+     */
+    switchToPresetType: function ($link, preset) {
+      const $type = $link.find('[data-smartlinks-type]').first();
+
+      if (!preset.types.length || !$type.is('select') || preset.types.indexOf($type.val()) !== -1) {
+        return null;
+      }
+
+      const handle = preset.types.find((candidate) => $type.find('option').filter((index, option) => option.value === candidate).length > 0);
+
+      if (!handle) {
+        return null;
+      }
+
+      $type.val(handle);
+      this.showType($link);
+
+      return $type.find('option:selected').text();
+    },
+
+    /**
+     * Shows the link's locks: a locked text input is read-only; a locked select or checkbox is
+     * disabled, and a hidden copy posts its value instead, as long as its feature applies to the
+     * link's type (an input for a feature the type lacks posts nothing at all).
+     */
+    applyLocks: function ($link) {
+      const locks = $link.data('smartlinksLocks') || {};
+      const preset = this.preset($link.data('smartlinksPreset'));
+
+      $link.find('[data-smartlinks-lock-copy], [data-smartlinks-lock-note]').remove();
+      $link.find('[data-smartlinks-locked]').each((index, input) => {
+        const $input = $(input).removeAttr('data-smartlinks-locked');
+
+        if ($input.is('select, :checkbox')) {
+          $input.prop('disabled', this.featureHidden($input));
+        } else {
+          $input.prop('readonly', false);
+        }
+      });
+
+      Object.keys(locks).forEach((suffix) => {
+        const $input = this.presetInput($link, suffix);
+
+        if (!$input.length) {
+          return;
+        }
+
+        $input.attr('data-smartlinks-locked', '');
+
+        if ($input.is('select, :checkbox')) {
+          $input.prop('disabled', true);
+
+          if (!this.featureHidden($input)) {
+            $('<input type="hidden" data-smartlinks-lock-copy>').attr('name', $input.attr('name')).val(this.inputValue($input)).insertAfter($input);
+          }
+        } else {
+          $input.prop('readonly', true);
+        }
+
+        if (preset) {
+          $('<p class="smartlinks-link__locked light" data-smartlinks-lock-note>')
+            .text(Craft.t('smart-links', 'Set by the “{preset}” preset.', {preset: preset.name}))
+            .appendTo($input.closest('.field'));
+        }
+      });
+    },
+
+    featureHidden: function ($input) {
+      const $feature = $input.closest('[data-smartlinks-feature]');
+
+      return $feature.length > 0 && $feature.hasClass('hidden');
     },
 
     runAction: function ($link, action) {
@@ -176,9 +420,13 @@
         $(this).find('input, select, textarea').prop('disabled', !supported);
       });
 
+      // A locked download checkbox is disabled, but still on: its filename stays editable.
       const download = $link.find('[data-smartlinks-download]')[0];
-      $link.find('[data-smartlinks-filename] input').prop('disabled', !download || download.disabled || !download.checked);
+      const downloadApplies = !$link.find('[data-smartlinks-feature="download"]').hasClass('hidden');
+      $link.find('[data-smartlinks-filename] input').prop('disabled', !download || !downloadApplies || !download.checked);
 
+      // The features shown have changed, so the locks are shown again for them.
+      this.applyLocks($link);
       this.updateTitle($link);
     },
 
@@ -529,12 +777,16 @@
       }
     },
 
-    addRow: function ($link, index) {
+    /**
+     * Adds a custom attribute row, empty and focused, or holding a preset's row. The row, or
+     * null when the link has no rows.
+     */
+    addRow: function ($link, index, values) {
       const template = this.$container.children('template[data-smartlinks-custom-row]')[0];
       const $rows = $link.find('[data-smartlinks-custom-rows]');
 
       if (!template || !$rows.length) {
-        return;
+        return null;
       }
 
       if (index === undefined) {
@@ -547,7 +799,17 @@
         .replace(/__ROW__/g, index);
 
       const $row = $(html.trim()).appendTo($rows);
-      $row.find('input').first().trigger('focus');
+
+      if (values) {
+        $row.find('input[name$="[name]"]').val(values.name);
+        $row.find('input[name$="[value]"]').val(values.value);
+        // Rows of a feature the link's type lacks post nothing, as the link's own rows don't.
+        $row.find('input').prop('disabled', this.featureHidden($rows));
+      } else {
+        $row.find('input').first().trigger('focus');
+      }
+
+      return $row;
     },
 
     clearStored: function () {

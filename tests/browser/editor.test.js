@@ -341,6 +341,95 @@
     kept.find('[data-smartlinks-clear]').trigger('click');
     window.confirm = confirm;
     check('confirming clears it', kept.find('input[name="fields[kept][stored]"]').length === 0 && !kept.find('[data-smartlinks-add]').prop('hidden'));
+
+    // Presets: choosing one fills in only what is still empty, choosing another takes back only
+    // what the last one filled in untouched, and what a preset locks is held while it is
+    // chosen. A link's stored values are its own: opening the editor changes none of them.
+    const EXTERNAL = 'e1a2b3c4-d5e6-4f70-8a9b-0c1d2e3f4a5b';
+    const TRACKED = 'f2b3c4d5-e6f7-4a81-9b0c-1d2e3f4a5b6c';
+    const DOWNLOAD = 'a3c4d5e6-f7a8-4b92-8c1d-2e3f4a5b6c7d';
+    const presetField = $('#fields-preset');
+    const presetLinks = () => presetField.find('[data-smartlinks-links] > [data-smartlinks-link]');
+    const setting = ($link, suffix) => $link.find(':input').filter((i, input) => input.type !== 'hidden' && input.name.slice(-suffix.length) === suffix).first();
+    const choose = ($link, uid) => $link.find('[data-smartlinks-preset]').val(uid).trigger('change');
+    const rows = ($link) => $link.find('[data-smartlinks-custom-rows] input[name$="[name]"]').map((i, input) => input.value).get();
+    // What a link's inputs post, read as PHP reads a form: the last input of a name wins.
+    const postedFor = ($link) => {
+      const values = {};
+      $link.find(':input[name]').each((i, input) => {
+        const match = /\[links\]\[[^\]]+\](.*)$/.exec(input.name);
+        if (match && !input.disabled && (input.type !== 'checkbox' || input.checked)) {
+          values[match[1]] = input.value;
+        }
+      });
+      return values;
+    };
+
+    const $made = presetLinks().eq(0);
+    check('a link made with a preset opens with its own values', setting($made, '[attributes][rel]').val() === 'nofollow' && setting($made, '[attributes][target]').val() === '_blank');
+    check('what its preset locks is read-only, and still posts', setting($made, '[attributes][target]').prop('disabled') && postedFor($made)['[attributes][target]'] === '_blank', postedFor($made));
+    check('a locked setting says which preset sets it', $made.find('[data-smartlinks-lock-note]').text() === 'Set by the “External” preset.', $made.find('[data-smartlinks-lock-note]').text());
+
+    const $own = presetLinks().eq(1);
+    choose($own, TRACKED);
+    check('choosing a preset fills in what is empty', setting($own, '[urlSuffix]').val() === '?ref=site' && postedFor($own)['[urlSuffix]'] === '?ref=site');
+    check('choosing a preset never overwrites what the link has', setting($own, '[attributes][class]').val() === 'mine');
+    check('a preset’s custom attributes are added as rows', rows($own).join() === 'data-track' && postedFor($own)['[attributes][custom][n0][value]'] === 'cta', postedFor($own));
+    check('applying a preset is announced', Craft.announced.slice(-1)[0] === '“Tracked” preset applied.', Craft.announced.slice(-1)[0]);
+
+    // The author changes what the preset filled in, and sets a target of their own.
+    setting($own, '[urlSuffix]').val('?ref=mine').trigger('input');
+    setting($own, '[attributes][target]').val('_top').trigger('change');
+    choose($own, EXTERNAL);
+    check('switching presets keeps what the author changed', setting($own, '[urlSuffix]').val() === '?ref=mine');
+    check('switching presets takes back what the last one filled in untouched', rows($own).length === 0, rows($own));
+    check('the new preset fills in what is now empty', setting($own, '[attributes][rel]').val() === 'external noopener');
+    check('a locked setting takes the preset’s value over the author’s, visibly', setting($own, '[attributes][target]').val() === '_blank' && setting($own, '[attributes][target]').prop('disabled') && postedFor($own)['[attributes][target]'] === '_blank' && $own.find('[data-smartlinks-lock-note]').length === 1);
+
+    choose($own, '');
+    check('no preset gives a locked setting back what it had', setting($own, '[attributes][target]').val() === '_top' && !setting($own, '[attributes][target]').prop('disabled') && postedFor($own)['[attributes][target]'] === '_top', postedFor($own));
+    check('no preset takes back only what it filled in', setting($own, '[attributes][rel]').val() === '' && setting($own, '[urlSuffix]').val() === '?ref=mine' && setting($own, '[attributes][class]').val() === 'mine');
+    check('no lock is left behind', $own.find('[data-smartlinks-lock-copy], [data-smartlinks-lock-note], [data-smartlinks-locked]').length === 0);
+    check('removing a preset is announced', Craft.announced.slice(-1)[0] === 'Preset removed.', Craft.announced.slice(-1)[0]);
+
+    // A preset disabled since a link was made with it: that link keeps it, named as disabled,
+    // with its lock shown; no other link is offered it.
+    const RETIRED = 'b4d5e6f7-a8b9-4ca3-9d2e-3f4a5b6c7d8e';
+    const $retired = presetLinks().eq(2);
+    const offers = ($link) => $link.find('[data-smartlinks-preset] option').map((i, option) => option.value).get();
+    check('a link keeps a preset disabled since, named as disabled', $retired.find('[data-smartlinks-preset]').val() === RETIRED && $retired.find('[data-smartlinks-preset] option:selected').text() === 'Retired (disabled)');
+    check('a disabled preset’s lock is still shown on the link that has it', setting($retired, '[attributes][class]').prop('readonly') && $retired.find('[data-smartlinks-lock-note]').text() === 'Set by the “Retired” preset.');
+    check('no other link is offered a disabled preset', offers($own).indexOf(RETIRED) === -1 && offers($made).indexOf(RETIRED) === -1, offers($own));
+
+    // Moving that link to an enabled preset, and back to the one it had (still offered to it).
+    choose($retired, DOWNLOAD);
+    check('switching away from a kept disabled preset keeps the link’s own values, unlocked', setting($retired, '[attributes][class]').val() === 'old' && !setting($retired, '[attributes][class]').prop('readonly'));
+    check('the new preset fills in and locks what it sets', setting($retired, '[attributes][download]').prop('checked') && postedFor($retired)['[attributes][download]'] === '1');
+    choose($retired, RETIRED);
+    check('switching back takes back what the other preset filled in, and locks again', !setting($retired, '[attributes][download]').prop('checked') && postedFor($retired)['[attributes][download]'] === '' && setting($retired, '[attributes][class]').prop('readonly') && setting($retired, '[attributes][class]').val() === 'old', postedFor($retired));
+
+    // Switching back and forth leaves no stale locks, copies or values.
+    for (let round = 0; round < 3; round++) {
+      choose($retired, DOWNLOAD);
+      choose($retired, RETIRED);
+    }
+
+    check('switching back and forth leaves one lock and no stale copies or fills', $retired.find('[data-smartlinks-lock-copy]').length === 0 && $retired.find('[data-smartlinks-locked]').length === 1 && $retired.find('[data-smartlinks-lock-note]').length === 1 && $retired.find('[data-smartlinks-filled]').length === 0 && !setting($retired, '[attributes][download]').prop('checked'));
+
+    // A preset for other link types switches the link to one it is for.
+    presetField.find('[data-smartlinks-add]').trigger('click');
+    const $new = presetLinks().last();
+    $new.find('[data-smartlinks-type]').val('email').trigger('change');
+    choose($new, DOWNLOAD);
+    check('a preset for other types switches the link to the first it is for', $new.find('[data-smartlinks-type]').val() === 'url');
+    check('a new link is not offered a disabled preset', offers($new).indexOf(RETIRED) === -1 && offers($new).indexOf(DOWNLOAD) !== -1, offers($new));
+    check('the switch is announced with the preset', Craft.announced.slice(-1)[0] === '“Download” preset applied, as a URL link.', Craft.announced.slice(-1)[0]);
+    check('a locked checkbox is on, read-only, and posts on', setting($new, '[attributes][download]').prop('checked') && setting($new, '[attributes][download]').prop('disabled') && postedFor($new)['[attributes][download]'] === '1', postedFor($new));
+    check('a locked download keeps its filename editable', !$new.find('[data-smartlinks-filename] input').prop('disabled'));
+    $new.find('[data-smartlinks-type]').val('email').trigger('change');
+    check('a lock on what the link’s type lacks posts nothing', !('[attributes][download]' in postedFor($new)), postedFor($new));
+    $new.find('[data-smartlinks-type]').val('url').trigger('change');
+    check('the lock holds again when the type has it', setting($new, '[attributes][download]').prop('disabled') && postedFor($new)['[attributes][download]'] === '1', postedFor($new));
   } catch (error) {
     check('the scenario ran without errors', false, String(error && error.stack || error));
   }
